@@ -1,6 +1,6 @@
 # SH-Mark-XL — Projekt-Roadmap (lebendes Dokument)
 
-> **Stand:** 2026-06-16 · **Version:** 3.0 · **Detailplan:** [`umbau_v3.md`](./umbau_v3.md)
+> **Stand:** 2026-06-19 · **Version:** 3.0 · **Detailplan:** [`umbau_v3.md`](./umbau_v3.md)
 > Dieses Dokument wird im gesamten Projektverlauf laufend aktualisiert. Statuslegende unten.
 
 ## Statuslegende
@@ -148,7 +148,7 @@ bestimmt (am Satelliten wechselt der Sprecher), nicht fix pro Verbindung.
 
 ---
 
-## Phase 3 — MCP-Hub + ESP32-Satellit (2/4)
+## Phase 3 — MCP-Hub + ESP32-Satellit (3/4) — Voice-Interface live ✅
 **Ziel:** Wissenserweiterung via MCP und raumbasiertes Voice-Interface.
 **Zeitfenster:** Woche 6–7
 
@@ -156,12 +156,12 @@ bestimmt (am Satelliten wechselt der Sprecher), nicht fix pro Verbindung.
   `mcp__<server>__<tool>` angeboten, Aufruf-Routing. Verwaltung im **Admin-UI** (Tab MCP: hinzufügen/entfernen/aktualisieren, Tool-Zähler/Status).
 - `[x]` **MCP-Autorisierung** — jeder Server = Ressource `mcp:<server>`; pro Gruppe freigebbar. Verifiziert (Smart-Home nur „Eltern", Gast verweigert). Getestet gegen Domoticz-MCP (27 Tools, echte Gerätesteuerung).
 - `[ ]` MCP-Sicherheit: Origin-Validierung (DNS-Rebinding) auch für Audio-WS; stdio-Transport (lokal)
-- `[~]` **Satelliten geplant** — `sat-pi.md` (Raspberry Pi, Python-Thin-Client, openWakeWord/Porcupine) und `sat-esp.md` (Waveshare ESP32-S3-AUDIO-Board: microWakeWord „Jarvis", ES7210/ES8311, 7× RGB, AEC). Reihenfolge: **Pi 3B+ zuerst**, dann ESP32-S3.
-- `[x]` **Pi-Satellit-Client gebaut** (`deploy/satellite/`: `satellite.py`, `config.example`, `install.sh`, systemd, README). openWakeWord „hey_jarvis", Aufnahme→`/api/stt`→`/api/chat/stream`→`/api/tts`, WS-Rückkanal (timer/notify/set_volume). Protokoll gegen Orchestrator verifiziert; **Audio/Wake-Word auf echtem Pi 3B+ noch zu testen**.
-- `[x]` **`set_device_volume`-Tool + Push** (Voice „Lautstärke 1–10" → `set_volume` an die Geräte-Session) — verifiziert.
-- `[x]` **Orchestrator-Endpoint `/ws/satellite`** (`app.py`): Binär-Audio (PCM s16le 16k) rein → STT+Sprecher → Chat → TTS-PCM raus (ffmpeg-Resampling); reuse `session_hub` (Push/Identität). End-to-End simuliert verifiziert.
-- `[~]` **ESP32-Firmware** (`deploy/satellite-esp/`, ESP-IDF): App-Logik/WS-Protokoll/Zustände/LEDs/**Lautstärke 50%-Default,90%-Cap** geschrieben; Codec(ES7210/ES8311)/microWakeWord/SoftAP-Portal als BSP-TODO. Im Download-Center. **Build/Flash + On-Device-Iteration offen** (nicht hier kompilierbar).
-- `[ ]` Satellit-Heartbeat → Geräteliste im Admin-UI; gesprochene Timer-Alarme an ESP (Server streamt TTS auf Push)
+- `[x]` **Satelliten gebaut** — `sat-pi.md` (Raspberry Pi) und `sat-esp.md` (Waveshare ESP32-S3-AUDIO-Board: WakeNet „Jarvis", ES7210/ES8311, 7× RGB). Reihenfolge wie geplant: Pi zuerst, dann ESP32-S3 — **beide laufen**.
+- `[x]` **Pi-Satellit** (`deploy/satellite/`): openWakeWord „hey_jarvis", Aufnahme→`/api/stt`→`/api/chat/stream`→`/api/tts`, WS-Rückkanal. **Auf Pi-Hardware getestet** (Jabra SPEAK 410, HW-Volume via amixer; Erkennungsschwelle 0.65 + Stimm-Nachenrollen).
+- `[x]` **`set_device_volume`-Tool + Push** (Voice „Lautstärke 1–10") — verifiziert; zusätzlich **Remote-Steuerung pro Gerät über die Admin-UI** (`POST /api/admin/devices/control`: Lautstärke % + Mic-Gain dB → Push `set_volume`/`set_mic_gain`).
+- `[x]` **Orchestrator-Endpoint `/ws/satellite`** (`app.py`): Binär-Audio (PCM s16le 16k) rein → STT+Sprecher → Chat → TTS-PCM raus; reuse `session_hub`. **Auf echter ESP-Hardware verifiziert**; TTS-Stream wird getaktet gesendet (sonst WS-Abbruch beim ESP).
+- `[x]` **ESP32-Firmware** (`deploy/satellite-esp/`, ESP-IDF) — **gebaut, geflasht, auf dem Waveshare-Board getestet**: Wake-Word „Jarvis", SoftAP-Captive-Portal, 7× RGB, **Lautstärke 50%-Default/90%-Cap** (Software-Gain) + remote Mic-Gain (NVS). Audio über esp-sr **AFE** (NS/AGC/AFE-VAD), **Dual-Mic per `#define` umschaltbar**. Task-Architektur feed/voice/uplink/playback getrennt, AFE-Pause während Wiedergabe, `WIFI_PS_NONE`. **Wichtig: CPU 240 MHz** (sonst AFE-Feed-Overflow). Im Download-Center (Quellcode-Tar ohne Build-Artefakte).
+- `[x]` **Satellit-Heartbeat → Admin-Geräteliste** (online/offline, Raum/Lautstärke/Mic-Gain/RSSI/FW) und **gesprochene Timer-Alarme/Benachrichtigungen an ESP/Pi** (Server streamt TTS-PCM bzw. JSON auf Push).
 
 **Akzeptanz:** Ein externer MCP-Server wird im UI registriert und seine Tools sind im Agenten nutzbar; ESP32 löst per Wake-Word einen vollständigen DE-Voice-Turn aus.
 
@@ -244,3 +244,5 @@ bestimmt (am Satelliten wechselt der Sprecher), nicht fix pro Verbindung.
 | 2026-06-18 | **Client python-frei (Linux fertig, Windows vorbereitet):** Sidecar via PyInstaller zur eigenständigen Binary kompiliert (Interpreter + websockets eingebettet) und über Tauri **externalBin** ins Bundle gelegt (Triple-Namensschema `sidecar-bin/jarvis-client-<triple>`; App startet die Binary neben der Exe → KEIN Python am Zielrechner). Linux-.deb enthält jetzt `usr/bin/jarvis-client` (10 MB, kein .py mehr), standalone getestet, im Download-Bereich (13 MB). Windows: nur `…-pc-windows-msvc.exe` per PyInstaller auf Windows erzeugen, dann `cargo tauri build` (Anleitung im README). macOS vorerst nicht nötig |
 | 2026-06-18 | **Client-Geräteadressierung + Windows-Fix:** Verbundene Client-Namen werden in den Prompt injiziert (`_connected_clients_hint`), neues Tool `list_clients`, `client_action(device=…)` adressiert gezielt (z.B. „Systeminfo vom Rechner VM"); bei Mehrdeutigkeit hilfreiche Rückfrage mit Namensliste (`_no_client_msg`). **Live verifiziert** gegen echten Windows-VM-Client des Nutzers (Routing korrekt). Windows-Konsolenfenster des Sidecars unterdrückt: `CREATE_NO_WINDOW` beim Spawn (main.rs) + `--noconsole` in build-sidecar.ps1 |
 | 2026-06-19 | **Client-Aktionen: Windows-Lücken gefüllt + erweitert (37):** Windows jetzt voll abgedeckt über Bordmittel — Fenster (ctypes user32: EnumWindows/ShowWindow/SetForegroundWindow/WM_CLOSE), Eingabe (SendKeys), Medien/Lautstärke (VK-Tasten + Core-Audio Add-Type für absolute Lautstärke/Mute), Notify (Tray-Balloon), Zwischenablage (Get/Set-Clipboard); Subprozesse mit CREATE_NO_WINDOW (keine Konsolen-Popups). **Neue Aktionen:** volume.up/down, process.list, fs.move/copy, system.shutdown/restart (shutdown/restart+fs.delete default-deny). Linux-Pfade verifiziert (system.info/process.list/fs.copy/move/list); volume braucht Audio-HW. Windows-Code reviewt (hier nicht testbar). Linux-.deb mit neuen Aktionen neu gebaut |
+| 2026-06-19 | **ESP32-S3-Satellit auf Hardware fertig:** Firmware gebaut/geflasht/getestet (Waveshare-Board). Mikrofon-Frontend auf esp-sr **AFE** umgestellt (NS/AGC/AFE-VAD), **Dual-Mic per `#define` umschaltbar**. Mehrere Iterationen an echten Logs gelöst: esp-sr-API (`get_feed_channel_num`/`VAD_SPEECH`); **FEED-Ringbuffer-Overflow** → getrennte feed/fetch-Tasks **und CPU 240 MHz** (160 nicht ausreichend für 2-Mic-BSS); **Lautstärke** → Software-Gain in `audio_write` (Codec-Volume griff nicht); **WS-Abbruch/Ruckeln bei TTS** → Uplink via eigenem Task entkoppelt, `WIFI_PS_NONE`, playback_task Prio 7, AFE-Pause während Wiedergabe, **getakteter TTS-Stream serverseitig**. Neu: **Remote Lautstärke + Mic-Gain pro Gerät über Admin-UI** (`/api/admin/devices/control`), Mic-Gain in NVS, Heartbeat meldet mic_gain. Firmware konsolidiert nach `deploy/satellite-esp/` (alte Variante entfernt), Download-Tar gehärtet (keine Build-Artefakte). **Akzeptanz Phase 3 erfüllt: ESP löst per Wake-Word vollständigen DE-Voice-Turn aus.** |
+| 2026-06-19 | **Doku + GitHub-Veröffentlichung:** Projekt-`README.md` (GitHub) erstellt, ESP-README + `aktuellerstand.md` aktualisiert, `.gitignore` (schützt certs/config.json/automations.json/Build-Artefakte). Secret-Scan vor Push (keine echten Keys; certs/config ausgeschlossen). Hochgeladen nach **github.com/bmetallica/JARVIS** (public, MIT-LICENSE erhalten), 18 Topics gesetzt, Tag **v0.1.0** |
