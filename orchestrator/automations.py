@@ -132,7 +132,8 @@ class AutomationManager:
 
     # ── CRUD ───────────────────────────────────────────────────────────────────
     def create(self, title: str, task: str, trigger: dict, *,
-               owner_user_id: int | None = None, target_session: str | None = None) -> dict:
+               owner_user_id: int | None = None, target_session: str | None = None,
+               kind: str = "agent", check_script: str | None = None, net: bool = True) -> dict:
         self._seq += 1
         aid = f"a{self._seq}"
         a = {
@@ -148,6 +149,12 @@ class AutomationManager:
             "last_result": None,
             "run_count": 0,
             "next_run": compute_next(trigger),
+            # ── Watcher-Modell: günstiges Prüf-Skript pro Tick, LLM nur bei echter Änderung ──
+            "kind": kind,                 # "agent" (LLM jeder Lauf) | "watcher" (Skript prüft, LLM bei Treffer)
+            "check_script": check_script, # Python-Skript (nur für watcher)
+            "state": {},                  # vom Skript gepflegter Zustand (z.B. zuletzt gesehene URL)
+            "net": bool(net),             # Watcher-Skript darf ins Netz (Quelle abrufen)
+            "fail_count": 0,              # aufeinanderfolgende Skript-Fehler (Self-Heal-Schwelle)
         }
         self._items[aid] = a
         self._save()
@@ -157,7 +164,8 @@ class AutomationManager:
         a = self._items.get(aid)
         if not a:
             return None
-        for k in ("title", "task", "enabled", "trigger", "target_session", "owner_user_id"):
+        for k in ("title", "task", "enabled", "trigger", "target_session", "owner_user_id",
+                  "check_script", "net", "state"):
             if k in fields and fields[k] is not None:
                 a[k] = fields[k]
         a["next_run"] = compute_next(a["trigger"]) if a["enabled"] else None

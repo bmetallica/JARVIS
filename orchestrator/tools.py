@@ -25,6 +25,7 @@ import messaging
 import sandbox
 import services
 import timers
+import watchers
 from session_hub import hub
 
 
@@ -339,7 +340,9 @@ TOOL_SCHEMAS = [
                            "ereignisgesteuert (z.B. wenn eine bestimmte Person erkannt wird). Nutze dies bei "
                            "Wünschen wie „erinnere mich täglich um 7 an…“, „prüfe stündlich… und sag Bescheid wenn…“, "
                            "„wenn Daniel erkannt wird, begrüße ihn“. Die Aufgabe wird im Hintergrund mit Werkzeugen "
-                           "ausgeführt und das Ergebnis genau an dieses Gerät gemeldet.",
+                           "ausgeführt und das Ergebnis genau an dieses Gerät gemeldet. "
+                           "WICHTIG: Soll auf eine ÄNDERUNG/NEUE INHALTE einer Quelle gewartet werden "
+                           "(„sag Bescheid, wenn…“), nutze stattdessen create_watch_automation (günstiger, zuverlässig).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -362,6 +365,31 @@ TOOL_SCHEMAS = [
                                     "Benutzername bei speaker_recognized."},
                 },
                 "required": ["title", "task", "trigger_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_watch_automation",
+            "description": "Überwacht eine Quelle EFFIZIENT auf Änderungen und meldet nur bei einem echten Ereignis "
+                           "(z.B. „behalte heise.de im Auge und sag Bescheid, wenn ein neuer Artikel erscheint“). Du "
+                           "schreibst dafür ein kleines Python-PRÜFSKRIPT, das pro Intervall GÜNSTIG in der Sandbox läuft "
+                           "(KEIN LLM pro Prüfung); erst wenn das Skript eine Änderung meldet, wird die eigentliche "
+                           "Aufgabe ausgeführt. Nutze dieses Werkzeug — NICHT create_automation — immer dann, wenn auf "
+                           "eine ÄNDERUNG oder NEUE INHALTE gewartet werden soll. Das Skript wird vor dem Speichern getestet.\n\n"
+                           + watchers.SCRIPT_CONTRACT,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Kurzer Name der Überwachung."},
+                    "check_script": {"type": "string", "description": "Das Python-Prüfskript gemäß Vertrag "
+                                     "(nutzt die vorgegebene Variable `state` und ruft `emit(...)` auf)."},
+                    "task": {"type": "string", "description": "Was bei einer erkannten Änderung getan/gemeldet werden "
+                             "soll, z.B. 'Informiere mich kurz über den neuen Artikel mit Titel und Link'."},
+                    "interval_minutes": {"type": "integer", "description": "Prüfabstand in Minuten (Standard 15)."},
+                },
+                "required": ["title", "check_script", "task"],
             },
         },
     },
@@ -580,6 +608,9 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
 
     if name == "create_automation":
         return _create_automation(args, ctx, sid)
+
+    if name == "create_watch_automation":
+        return await _create_watch_automation(args, ctx, sid)
 
     if name == "list_automations":
         items = automations.manager.list(ctx.get("user_id"))
@@ -1070,6 +1101,36 @@ def _create_automation(args: dict, ctx: dict, sid: str) -> str:
     )
     return (f"Automatisierung „{a['title']}“ angelegt ({automations.trigger_summary(trigger)}). "
             "Ich kümmere mich von selbst darum.")
+
+
+async def _create_watch_automation(args: dict, ctx: dict, sid: str) -> str:
+    """Watcher anlegen: Prüfskript zuerst in der Sandbox testen (Baseline merken), dann speichern."""
+    title = (args.get("title") or "").strip()
+    task = (args.get("task") or "").strip()
+    script = (args.get("check_script") or "").strip()
+    if not script:
+        return "Mir fehlt das Prüfskript (check_script)."
+    try:
+        mins = int(args.get("interval_minutes") or 15)
+    except (TypeError, ValueError):
+        mins = 15
+    if mins <= 0:
+        mins = 15
+    uid = ctx.get("user_id")
+    namespace = f"u{uid}" if uid else "guest"
+    # Test-Lauf mit leerem Zustand: fängt Skript-Fehler VOR dem Speichern ab und etabliert die
+    # Baseline (aktueller Stand), damit beim ersten echten Tick nicht alles als „neu“ gemeldet wird.
+    test = await asyncio.to_thread(watchers.run_check, {"check_script": script, "state": {}, "net": True}, namespace)
+    if not test.get("ok"):
+        return ("Das Prüfskript läuft noch nicht sauber — bitte korrigiere es anhand des Fehlers und rufe "
+                "create_watch_automation erneut auf:\n" + test.get("error", ""))
+    baseline = test["parsed"].get("state") if isinstance(test["parsed"].get("state"), dict) else {}
+    a = automations.manager.create(
+        title=title, task=task, trigger={"type": "interval", "seconds": mins * 60},
+        owner_user_id=uid, target_session=sid, kind="watcher", check_script=script, net=True)
+    automations.manager.update(a["id"], state=baseline)
+    return (f"Überwachung „{a['title']}“ eingerichtet — ich prüfe alle {mins} min günstig per Skript "
+            "und melde mich erst, wenn sich wirklich etwas ändert.")
 
 
 def _format_sandbox_result(res: dict) -> str:

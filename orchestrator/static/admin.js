@@ -230,14 +230,22 @@ async function loadAutomations() {
         const div = document.createElement("div"); div.className = "item";
         const badge = a.enabled ? '<span class="tag" style="background:var(--ok);color:#04141b">aktiv</span>'
                                 : '<span class="tag" style="background:#33404d;color:#9fb3c8">aus</span>';
+        const kindBadge = a.kind === "watcher"
+            ? '<span class="tag" style="background:#2a3f5f;color:#9fc3ff">🔍 Überwachung</span>' : "";
         const last = a.last_result ? `<div class="muted" style="font-size:11px">zuletzt: ${a.last_result}</div>` : "";
-        div.innerHTML = `<div class="head"><span class="name">${a.title} ${badge}</span>
-            <span><button class="small" data-run="${a.id}">▶ Jetzt</button>
+        let watchInfo = "";
+        if (a.kind === "watcher") {
+            const st = a.state && Object.keys(a.state).length ? JSON.stringify(a.state).slice(0, 120) : "—";
+            const fail = a.fail_count ? ` · <span style="color:var(--bad)">Skript-Fehler: ${a.fail_count}</span>` : "";
+            watchInfo = `<div class="muted" style="font-size:11px">Zustand: ${st}${fail}</div>`;
+        }
+        div.innerHTML = `<div class="head"><span class="name">${a.title} ${badge} ${kindBadge}</span>
+            <span><button class="small" data-run="${a.id}">▶ ${a.kind === "watcher" ? "Jetzt prüfen" : "Jetzt"}</button>
             <button class="small secondary" data-edit="${a.id}">✎ Bearbeiten</button>
             <button class="small secondary" data-tog="${a.id}">${a.enabled ? "Deaktivieren" : "Aktivieren"}</button>
             <button class="small danger" data-del="${a.id}">Löschen</button></span></div>
             <div class="muted" style="font-size:12px">${a.trigger_text}${a.next_run_text ? " · nächste: " + a.next_run_text : ""}
-            · Läufe: ${a.run_count}</div>
+            · Läufe: ${a.run_count}</div>${watchInfo}
             <div class="atask" style="font-size:12px;margin-top:3px">${a.task}</div>
             <div class="aedit" style="display:none;margin-top:6px">
                 <input class="ed-title" value="${a.title.replace(/"/g, "&quot;")}" style="width:100%;margin-bottom:4px">

@@ -34,6 +34,7 @@ import biometrics
 import mcp_hub
 import debug
 import automations
+import watchers
 import messaging
 from session_hub import hub
 
@@ -566,8 +567,15 @@ async def announce(session_id: str, text: str, *, kind: str = "notify", **meta) 
 # ── Autonomie: geplante/ereignisgesteuerte Selbstläufe ────────────────────────
 
 async def _run_automation(autom: dict, payload: dict | None) -> str:
-    """Runner für den AutomationManager: führt die Aufgabe AUTONOM im Agenten-Tool-Loop aus.
-    Läuft unter den Rechten des Besitzers (+ Autonomie-Blacklist via ctx['autonomous'])."""
+    """Runner für den AutomationManager. Watcher = günstiger Skript-Check, LLM nur bei Treffer;
+    sonst klassischer autonomer Agenten-Tool-Loop."""
+    if autom.get("kind") == "watcher":
+        return await _run_watcher(autom, payload)
+    return await _automation_llm_run(autom, payload)
+
+
+async def _automation_llm_run(autom: dict, payload: dict | None, extra_user: str | None = None) -> str:
+    """Führt die Aufgabe AUTONOM im Agenten-Tool-Loop aus (Besitzer-Rechte + Autonomie-Blacklist)."""
     cfg = config.get()
     uid = autom.get("owner_user_id")
     namespace = f"u{uid}" if uid else "guest"
@@ -584,7 +592,8 @@ async def _run_automation(autom: dict, payload: dict | None) -> str:
               "Gibt es nach Erledigung NICHTS Berichtenswertes für den Nutzer, antworte AUSSCHLIESSLICH mit dem Wort "
               "SILENT. Andernfalls formuliere eine kurze, natürliche deutsche Meldung, die dem Nutzer proaktiv "
               "mitgeteilt wird." + _now_hint() + sat + ctxinfo)
-    working = [{"role": "system", "content": system}, {"role": "user", "content": autom["task"]}]
+    user_msg = autom["task"] + (("\n\n" + extra_user) if extra_user else "")
+    working = [{"role": "system", "content": system}, {"role": "user", "content": user_msg}]
     available = tools.TOOL_SCHEMAS + mcp_hub.tool_schemas()
     debug.log("automation_run", id=autom["id"], title=autom["title"], user=uid, session=sid,
               task=autom["task"][:200])
@@ -592,6 +601,68 @@ async def _run_automation(autom: dict, payload: dict | None) -> str:
     content = (r.get("content") or "").strip()
     debug.log("automation_done", id=autom["id"], ok=r.get("ok"), reply=content[:200])
     return content
+
+
+async def _run_watcher(autom: dict, payload: dict | None) -> str:
+    """Watcher-Lauf: Prüfskript billig in der Sandbox; LLM nur bei echtem Treffer.
+    Mutiert `autom` (state/fail_count/check_script) — der AutomationManager speichert danach."""
+    uid = autom.get("owner_user_id")
+    namespace = f"u{uid}" if uid else "guest"
+    chk = await asyncio.to_thread(watchers.run_check, autom, namespace)
+
+    if not chk["ok"]:
+        autom["fail_count"] = autom.get("fail_count", 0) + 1
+        debug.log("watcher_error", id=autom["id"], fails=autom["fail_count"], error=chk["error"][:200])
+        if autom["fail_count"] < watchers.FAIL_THRESHOLD:
+            return automations.SILENT_TOKEN                      # unter Schwelle → still abwarten
+        if await _repair_watcher(autom, chk["error"]):          # Self-Heal versuchen
+            debug.log("watcher_healed", id=autom["id"])
+            return automations.SILENT_TOKEN
+        autom["enabled"] = False                                # nicht reparierbar → pausieren + melden
+        return (f"Die Überwachung „{autom['title']}“ funktioniert nicht mehr und ließ sich nicht automatisch "
+                f"reparieren — ich habe sie pausiert. Letzter Fehler: {chk['error'][:200]}")
+
+    autom["fail_count"] = 0
+    parsed = chk["parsed"]
+    autom["state"] = parsed.get("state") if isinstance(parsed.get("state"), dict) else (autom.get("state") or {})
+    debug.log("watcher_check", id=autom["id"], triggered=bool(parsed.get("triggered")))
+    if not parsed.get("triggered"):
+        return automations.SILENT_TOKEN                          # keine Änderung → kein LLM, keine Meldung
+
+    summary = (parsed.get("summary") or "").strip()
+    msg = (await _automation_llm_run(autom, payload, extra_user=(
+        "Die Überwachung hat ausgelöst. Neue/relevante Information:\n" + (summary or "(ohne Detail)") +
+        "\n\nFühre die Aufgabe aus und melde dem Nutzer das Ergebnis kurz und natürlich.")) or "").strip()
+    # Ein Treffer wird IMMER gemeldet — liefert der LLM-Lauf nichts/SILENT, nutze die Roh-Zusammenfassung.
+    if not msg or msg.upper().strip(".!") == automations.SILENT_TOKEN:
+        msg = summary or f"Die Überwachung „{autom['title']}“ hat ausgelöst."
+    return msg
+
+
+async def _repair_watcher(autom: dict, error: str) -> bool:
+    """Lässt das LLM das defekte Prüfskript neu schreiben und testet es. True = repariert."""
+    cfg = config.get()
+    uid = autom.get("owner_user_id")
+    namespace = f"u{uid}" if uid else "guest"
+    system = (cfg["system_prompt"] + "\n\n" + watchers.SCRIPT_CONTRACT +
+              "\n\nEin bestehendes Überwachungs-Skript ist FEHLERHAFT. Schreibe es KORRIGIERT neu. "
+              "Antworte AUSSCHLIESSLICH mit dem reinen Python-Skript — kein Markdown, keine Erklärung.")
+    user = (f"Ziel der Überwachung: {autom.get('task')}\n\nAktuelles (fehlerhaftes) Skript:\n"
+            f"{autom.get('check_script')}\n\nFehler beim letzten Lauf:\n{error}")
+    ctx = {"session_id": "autonomous", "cfg": cfg, "namespace": namespace, "user_id": uid, "autonomous": True}
+    r = await _run_loop(cfg, ctx, [{"role": "system", "content": system},
+                                   {"role": "user", "content": user}], tools.TOOL_SCHEMAS, think=True)
+    new_script = watchers.strip_code_fences((r.get("content") or "").strip())
+    if not new_script:
+        return False
+    test = await asyncio.to_thread(watchers.run_check, {**autom, "check_script": new_script}, namespace)
+    if test.get("ok"):
+        autom["check_script"] = new_script
+        autom["fail_count"] = 0
+        if isinstance(test["parsed"].get("state"), dict):
+            autom["state"] = test["parsed"]["state"]
+        return True
+    return False
 
 
 async def _deliver_automation(autom: dict, text: str, payload: dict | None) -> None:
@@ -1033,6 +1104,9 @@ async def admin_device_control(body: dict, jarvis_admin_token: str | None = Cook
 def _automation_view(a: dict) -> dict:
     return {**{k: a[k] for k in ("id", "title", "task", "trigger", "owner_user_id",
                                  "target_session", "enabled", "last_run", "last_result", "run_count", "next_run")},
+            "kind": a.get("kind", "agent"),
+            "fail_count": a.get("fail_count", 0),
+            "state": a.get("state") or {},
             "trigger_text": automations.trigger_summary(a["trigger"]),
             "next_run_text": (time.strftime("%d.%m.%Y %H:%M", time.localtime(a["next_run"]))
                               if a.get("next_run") else None)}

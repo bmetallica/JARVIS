@@ -24,16 +24,19 @@ def available() -> bool:
         return False
 
 
-def execute(code: str, language: str = "python", namespace: str = "default") -> dict:
+def execute(code: str, language: str = "python", namespace: str = "default",
+            allow_network: bool | None = None) -> dict:
     cfg = config.get()
     if not cfg.get("sandbox_enabled", True):
         return {"ok": False, "stderr": "Code-Ausführung ist deaktiviert (Admin).", "disabled": True}
+    # allow_network: None = globaler Admin-Toggle; True/False = expliziter Override (z.B. Watcher-Skripte).
+    net = bool(cfg.get("sandbox_allow_network", True)) if allow_network is None else bool(allow_network)
     payload = {
         "language": language,
         "code": code,
         "namespace": namespace,
         "timeout": int(cfg.get("sandbox_timeout_s", 30)),
-        "allow_network": bool(cfg.get("sandbox_allow_network", True)),
+        "allow_network": net,
     }
     try:
         r = requests.post(_base() + "/exec", json=payload,
