@@ -1,0 +1,91 @@
+Projektbeschreibung: Secure Hybrid Mark-XL (SH-Mark-XL) – Version 2.0
+?? Zielsetzung
+Transformation von Mark-XL in ein verteiltes, multi-client-fähiges KI-Ökosystem. Das zentrale „Gehirn“ läuft isoliert im Docker-Container, verfügt über ein eigenes Web-Interface mit Voice-Unterstützung (STT/TTS), steuert eigene interne Sandbox-Werkzeuge (Browsing, Recherche) und verwaltet eine dynamische Anzahl externer MCP-Server. Gleichzeitig orchestriert es sicher mehrere registrierte Endgeräte (PCs) über verschlüsselte Client-Verbindungen.
+
+??? Erweiterte System-Architektur
+                                  +---------------------------+
+                                  ¦    Externe MCP-Server     ¦
+                                  ¦   (Streamable HTTP / SSE) ¦
+                                  +---------------------------+
+                                                ¦ (MCP)
++-----------------------------------------------?-----------------------------------------------+
+¦                           PART A: CORE SERVER (DOCKER CONTAINER)                              ¦
+¦                                                                                               ¦
+¦  +-------------------------+   +-------------------------------+   +-----------------------+  ¦
+¦  ¦   Interne Werkzeuge     ¦   ¦     Orchestrator & Core       ¦   ¦  Audio Pipeline       ¦  ¦
+¦  ¦  - Container-Browser    ¦   ¦  - LLM / Ollama (Mark-XL)     ¦   ¦  - Web-STT / TTS      ¦  ¦
+¦  ¦  - Google Search API    ¦?-?¦  - Tool-Routing Engine        ¦?-?¦  - Audio-Stream-Server¦  ¦
+¦  ¦  - Local Sandbox (CLI)  ¦   ¦  - Client-Registry (Sitzungen)¦   ¦    (WebSockets)       ¦  ¦
+¦  +-------------------------+   +-------------------------------+   +-----------?-----------+  ¦
++------------------------------------------------¦-------------------------------¦--------------+
+                                                 ¦ (mTLS / WebSockets)           ¦ (PCM/Opus)
+                    +-----------------------------------------+                  ¦
+                    ¦                                         ¦                  ¦
+ +------------------?------------------+   +------------------?------------------+  ¦
+ ¦      PART B: CLIENT 1 (Desktop PC)  ¦   ¦      PART B: CLIENT 2 (Laptop)      ¦  ¦
+ ¦ - Tauri App / OS-Exec Daemon        ¦   ¦ - Tauri App / OS-Exec Daemon        ¦  ¦
+ ¦ - Scope Validator (z.B. Windows)    ¦   ¦ - Scope Validator (z.B. macOS)      ¦  ¦
+ +-------------------------------------+   +-------------------------------------+  ¦
+                                                                                    ¦
+                                                                     +-----------------------+
+                                                                     ¦ ESP32 Audio-Satellit  ¦
+                                                                     ¦ (Mikrofon / Lautspr.) ¦
+                                                                     +-----------------------+
+1. Interne Container-Fähigkeiten (Die Sandbox-Tools)
+Der Agent nutzt ein duales Tool-System. Bevor ein Befehl an ein Betriebssystem gesendet wird, prüft die Routing Engine, ob die Aktion intern gelöst werden kann:
+
+Interne Aktionen: Websuchen (z. B. via SearXNG oder Google API), Web-Scraping und die Ausführung von Test-Skripten finden im Container statt. Der Agent verfügt dort über einen eigenen Headless-Browser (Playwright/Selenium).
+
+Externe Aktionen: Nur wenn der Nutzer explizit sagt „Öffne meine Excel-Tabelle auf meinem PC“, wird der Befehl nach außen geroutet.
+
+2. Multi-Client-Registry & Session-Management
+Der Core-Server verwaltet eine Tabelle aller aktiv verbundenen mTLS-Clients.
+
+Jeder Client meldet sich beim Verbindungsaufbau mit einer eindeutigen ID und Metadaten (z. B. Hostname: Arbeits-PC, OS: Windows 11, Status: Aktiv) an.
+
+Im Web-UI sieht der Nutzer, welche PCs online sind.
+
+Intelligentes Routing: Der Agent kann im Kontext unterscheiden: "Ich erstelle das Dokument auf deinem Laptop (Client 2), da du dort gerade arbeitest", oder fragt im Zweifel nach: "Auf welchem PC soll ich das Programm starten?".
+
+3. Audio- & Kommunikations-Layer (Browser & Hardware)
+Die Sprachinteraktion wird zweigleisig aufgebaut:
+
+Web-Browser: Das Web-Frontend nutzt die native Web Audio API für die Aufnahme. Die Daten werden an ein STT-Modul (z. B. Whisper) im Container geschickt. Die Ausgabe erfolgt über TTS (z. B. XTTS oder OpenAI API) direkt als Audio-Stream zurück an den Browser.
+
+ESP32-Satellit: Ein kleiner Mikrocontroller (wie ein ESP32-S3-Box mit Mikrofon-Array) baut eine direkte WebSocket- oder UDP-Audio-Streaming-Verbindung zum Container auf. Er fungiert als raumbasiertes "Smart-Speaker"-Interface, das dauerhaft im Raum platziert werden kann.
+
+4. MCP-Hub (Wissenserweiterung)
+Das Model Context Protocol (MCP) ist der Schlüssel für die Zukunftssicherheit des Agenten.
+
+Der Core-Server erhält einen integrierten MCP-Client.
+
+Über das Web-UI können dynamisch entfernte MCP-Server per Streamable HTTP (dem modernen Nachfolger von HTTP+SSE) oder lokal im Container per stdio registriert werden.
+
+Dadurch kann der Agent nahtlos auf externe Datenquellen (z. B. deine GitHub-Repos, Jira, lokale Entwicklungsdatenbanken oder spezialisierte Wissensdatenbanken) zugreifen, ohne dass der Kerncode von Mark-XL modifiziert werden muss.
+
+??? Anpassung der Entwicklungs-Roadmap
+Die Roadmap wird erweitert, um diese Kernfeatures logisch zu integrieren (Fokus auf schrittweise Erweiterung der Fähigkeiten).
+
+Phase 1: Die Sandbox & Interne Core-Tools (Woche 1–2)
+Container-Fähigkeiten: Docker-Setup erstellen. Integration von Python-Bibliotheken für interne Websuchen und Scraping direkt im Container.
+
+Mark-XL Entkopplung: Umbau des Tool-Systems. Einführung der Routing Engine, die entscheidet: "Führe ich das intern im Container aus oder sende ich es an ein externes Gerät?".
+
+Browser-Audio: Integration eines Web-UI-Prototyps mit Audio-Streaming-Support für STT (Whisper) und TTS.
+
+Phase 2: Das Multi-Client-Netzwerk (Woche 3–4)
+Registry-Datenbank: Implementierung einer internen Session-Verwaltung (z. B. via SQLite oder In-Memory), um mehrere mTLS-Verbindungen gleichzeitig zu halten.
+
+Client-Handshake: Erweiterung des Tauri-Clients auf dem PC. Beim Start sendet der Client ein Hardware-Profil an den Server.
+
+UI-Steuerung: Ausbau des Web-Dashboards, damit der Nutzer sieht, welche Geräte verbunden sind, und ein "Standard-Gerät" für Befehle definieren kann.
+
+Phase 3: Der MCP-Hub & Hardware-Satelliten (Woche 5–6)
+MCP Streamable HTTP: Einbau eines MCP-Client-Moduls in den Python-Core. Implementierung der Verbindungskomponente für Streamable HTTP-Verbindungen (inklusive Origin-Validierung zur Absicherung gegen DNS-Rebinding-Angriffe).
+
+ESP32-Firmware: Schreiben einer einfachen C++/Arduino-Firmware für den ESP32, die Audiodaten vom Mikrofon erfasst, komprimiert (z. B. via Opus oder rohem PCM) und per WebSocket an den Server streamt.
+
+Phase 4: Validierung, Rechtemanagement & Polish (Woche 7–8)
+Sicherheit im Multi-Client-Betrieb: Feingranulare Rechte pro Client. (Beispiel: Laptop darf Dateien schreiben, Arbeits-PC erlaubt nur Read-Only).
+
+Stresstest: Testen der Reaktionslatenz, wenn der Agent gleichzeitig über ein MCP-Wissen abfragt, im Container googelt und das Ergebnis auf einem spezifischen Client-PC als Datei ablegt.

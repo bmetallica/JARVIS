@@ -1,0 +1,31 @@
+# JARVIS Code-Sandbox (Tier 3) — isolierter Ausführungs-Container.
+# Start:  cd deploy/sandbox && docker compose up -d --build
+services:
+  sandbox:
+    build: .
+    container_name: jarvis-sandbox
+    # NUR lokal erreichbar (Orchestrator läuft auf demselben Host)
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - sandbox_workspace:/workspace          # persistente Arbeitsdateien je Namespace
+    restart: unless-stopped
+    # ── Härtung ────────────────────────────────────────────────
+    mem_limit: 1g
+    pids_limit: 256
+    cpus: 2.0
+    # Code läuft als Nicht-root mit gedroppten Capabilities. seccomp=unconfined ist nötig,
+    # damit ein Job bei deaktiviertem Internet eine eigene (unprivilegierte) User-/Netz-
+    # Namespace via `unshare -rn` öffnen kann (nur loopback). Die Caps gelten dann nur in
+    # dieser Kind-Namespace; die Isolation trägt der separate Container + cgroup-Limits.
+    cap_drop:
+      - ALL
+    security_opt:
+      - seccomp=unconfined
+    tmpfs:
+      - /tmp:size=256m
+    # Netzwerk bleibt an (Internet im Code möglich); pro Job über `unshare -rn`
+    # abschaltbar, gesteuert vom Orchestrator (Admin-Toggle sandbox_allow_network).
+
+volumes:
+  sandbox_workspace:

@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+requests
+python-multipart
+pydantic
+edge-tts
+piper-tts
+ddgs
+pypdf

@@ -1,0 +1,25 @@
+# SH-Jarvis Satellit — Konfiguration (nach satellite.conf kopieren)
+# Orchestrator (Tier 1)
+orchestrator_url = https://192.168.66.224:8088
+# Selbstsigniertes Cert akzeptieren (true), bis ein echtes Cert/Hostname vorliegt
+verify_tls = false
+
+# Raumname dieses Satelliten (erscheint als Session-/Geräte-Name; Alarme landen hier)
+room_name = Wohnzimmer
+
+# Wake-Word (openWakeWord-Modellname). "hey_jarvis" = vortrainiert, frei.
+wakeword = hey_jarvis
+wakeword_threshold = 0.5
+
+# Lautstärke (Pi): Start 50 %, Mapping Sprachbefehl Stufe 1–10 → 10–100 %
+start_volume = 50
+max_volume = 100
+# ALSA-Karte für die Hardware-Lautstärke (amixer). Leer = Default-Karte; sonst Name/Nummer, z. B. "USB".
+alsa_card = USB
+
+# Audio-Geräte: leer = Standardgerät (empfohlen, wenn die USB-Karte ALSA-Default ist).
+# Sonst PORTAUDIO-Index ODER Namens-Teil — NICHT 'plughw:...'!
+# Geräte/Indizes anzeigen:  /opt/jarvis-satellite/venv/bin/python -m sounddevice
+# Beispiele:  input_device = 1   oder   input_device = USB
+input_device =
+output_device =

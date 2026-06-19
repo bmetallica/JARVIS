@@ -1,0 +1,31 @@
+:root { --bg:#0a1219; --panel:#0f1c26; --line:#243446; --fg:#dce8f0; --muted:#7e93a6;
+        --acc:#28d2c8; --ok:#28d27a; --bad:#e0556a; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); font-size:14px; }
+header { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid var(--line); }
+.logo { color:var(--acc); font-size:26px; }
+header h1 { margin:0; font-size:17px; } header .sub { color:var(--muted); font-size:12px; }
+.status { margin-left:auto; font-size:13px; color:var(--muted); }
+.status.ok { color:var(--ok); } .status.off { color:var(--bad); }
+nav { display:flex; gap:4px; padding:10px 18px 0; }
+.tab { background:transparent; color:var(--muted); border:none; padding:8px 14px; cursor:pointer;
+       border-bottom:2px solid transparent; font-size:14px; }
+.tab.active { color:var(--fg); border-bottom-color:var(--acc); }
+main { padding:18px; }
+.panel { display:flex; flex-direction:column; gap:12px; }
+.hidden { display:none; }
+label { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:12px; }
+label.row { flex-direction:row; align-items:center; gap:8px; color:var(--fg); font-size:14px; }
+input[type=text], input:not([type]) { background:var(--panel); border:1px solid var(--line);
+       color:var(--fg); border-radius:8px; padding:9px 11px; font-size:14px; }
+textarea { width:100%; min-height:340px; background:#06101a; border:1px solid var(--line); color:var(--fg);
+       border-radius:8px; padding:11px; font-family: ui-monospace, monospace; font-size:12.5px; }
+hr { border:none; border-top:1px solid var(--line); margin:4px 0; }
+.actions { display:flex; align-items:center; gap:12px; margin-top:4px; }
+button { background:var(--acc); color:#04141b; border:none; border-radius:8px; padding:9px 16px;
+       font-weight:600; cursor:pointer; }
+button.secondary { background:var(--panel); color:var(--fg); border:1px solid var(--line); font-weight:400; }
+.muted { color:var(--muted); font-size:12px; }
+code { background:#06101a; padding:1px 5px; border-radius:4px; }
+pre { background:#06101a; border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12px;
+       white-space:pre-wrap; max-height:55vh; overflow:auto; }

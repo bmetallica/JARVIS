@@ -1,0 +1,17 @@
+[Unit]
+Description=SH-Jarvis Sprachsatellit
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jarvis-satellite
+ExecStart=/opt/jarvis-satellite/venv/bin/python /opt/jarvis-satellite/satellite.py
+Restart=always
+RestartSec=3
+# Audio-Zugriff
+SupplementaryGroups=audio
+Environment=JARVIS_SAT_CONF=/opt/jarvis-satellite/satellite.conf
+
+[Install]
+WantedBy=multi-user.target

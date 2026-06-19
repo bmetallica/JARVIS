@@ -1,0 +1,23 @@
+# Datenspeicher für SH-Jarvis (Tier 1): PostgreSQL + pgvector.
+# Hält das Langzeitgedächtnis UND die RAG-Wissensbasis (eine Tabelle, getrennt
+# nach 'kind'). Läuft auf dem Orchestrator-Host.
+#
+# Start:  docker compose -f deploy/data/docker-compose.yml up -d
+name: shmarkxl-data
+
+services:
+  pgvector:
+    image: pgvector/pgvector:pg16
+    container_name: shmarkxl-pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jarvis
+      POSTGRES_PASSWORD: jarvis
+      POSTGRES_DB: jarvis
+    ports:
+      - "5440:5432"        # Host 5440 → Container 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS · Admin</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body class="admin">
+    <header>
+        <div class="brand">
+            <span class="logo">◈</span>
+            <div><h1>JARVIS · ADMIN</h1><span class="subtitle">Nutzer · Gruppen · Rechte</span></div>
+        </div>
+        <div class="status">
+            <a href="/" class="link">← zur Assistenz</a>
+            <span id="who"></span>
+            <button id="btn-logout" class="secondary" style="display:none">Abmelden</button>
+        </div>
+    </header>
+
+    <main class="admin-main">
+        <!-- Login -->
+        <section id="view-login" class="card hidden">
+            <h2>Anmeldung</h2>
+            <label>Benutzername <input id="login-user" autocomplete="username"></label>
+            <label>Passwort <input id="login-pass" type="password" autocomplete="current-password"></label>
+            <button id="btn-login">Anmelden</button>
+            <p class="muted">Erstanmeldung: <code>admin</code> / <code>admin</code> (muss danach geändert werden).</p>
+            <p id="login-err" class="err"></p>
+        </section>
+
+        <!-- Passwort ändern (erzwungen) -->
+        <section id="view-change" class="card hidden">
+            <h2>Passwort ändern</h2>
+            <p class="muted">Bitte vergib ein neues Passwort, bevor du fortfährst.</p>
+            <label>Neues Passwort <input id="chg-pass" type="password" autocomplete="new-password"></label>
+            <label>Wiederholen <input id="chg-pass2" type="password" autocomplete="new-password"></label>
+            <button id="btn-change">Speichern</button>
+            <p id="chg-err" class="err"></p>
+        </section>
+
+        <!-- Verwaltung -->
+        <section id="view-admin" class="hidden">
+            <nav class="adminnav">
+                <button class="navbtn active" data-tab="system">⚙ System</button>
+                <button class="navbtn" data-tab="users">👤 Nutzer</button>
+                <button class="navbtn" data-tab="groups">🛡 Gruppen &amp; Rechte</button>
+                <button class="navbtn" data-tab="mcp">🔌 MCP-Server</button>
+                <button class="navbtn" data-tab="devices">📡 Geräte</button>
+                <button class="navbtn" data-tab="autonomy">🤖 Autonomie</button>
+                <button class="navbtn" data-tab="debug">🐞 Debug</button>
+            </nav>
+
+            <div class="card tab hidden" data-tab="autonomy">
+                <h2>Autonomie — Automatisierungen</h2>
+                <p class="muted" style="font-size:12px">JARVIS handelt hier selbstständig: zeitgesteuert
+                   (einmalig/Intervall/täglich/wöchentlich) oder durch Ereignisse (z.B. erkannter Sprecher).
+                   Bei Fälligkeit führt der Agent die Aufgabe im Hintergrund aus und meldet das Ergebnis an die
+                   Zielquelle — meldet der Agent „SILENT“, passiert nichts.</p>
+                <label class="inline"><input type="checkbox" id="auto-scheduler"> Scheduler global aktiv</label>
+                <div id="automations" style="margin-top:10px"></div>
+
+                <fieldset style="margin-top:14px"><legend>Neue Automatisierung</legend>
+                    <label>Titel <input id="na-title" placeholder="z. B. Morgen-Briefing"></label>
+                    <label>Aufgabe (was soll JARVIS tun?)
+                        <textarea id="na-task" rows="2" placeholder="Hole das Wetter für Hamburg und fasse es in einem Satz zusammen."></textarea></label>
+                    <div class="row">
+                        <label>Auslöser
+                            <select id="na-type">
+                                <option value="once">einmalig</option>
+                                <option value="interval">Intervall</option>
+                                <option value="daily" selected>täglich</option>
+                                <option value="weekly">wöchentlich</option>
+                                <option value="event">Ereignis</option>
+                            </select>
+                        </label>
+                        <label data-trig="once">Zeitpunkt <input id="na-at" type="datetime-local"></label>
+                        <label data-trig="interval">alle (Min) <input id="na-interval" type="number" value="60" min="1"></label>
+                        <label data-trig="daily weekly">Uhrzeit <input id="na-time" type="time" value="07:00"></label>
+                        <label data-trig="event">Ereignis
+                            <select id="na-event"><option value="speaker_recognized">Sprecher erkannt</option></select>
+                        </label>
+                        <label data-trig="event">Filter (optional) <input id="na-match" placeholder="z. B. daniel"></label>
+                    </div>
+                    <div class="row" data-trig="weekly" id="na-weekdays-row">
+                        <span class="muted" style="font-size:12px">Wochentage:</span>
+                        <span id="na-weekdays"></span>
+                    </div>
+                    <label>Zielgerät (Session-ID, optional)
+                        <input id="na-target" placeholder="leer = Browser/Standard; sonst z. B. esp-… Session"></label>
+                    <button id="btn-add-automation">Anlegen</button>
+                </fieldset>
+
+                <fieldset style="margin-top:14px"><legend>Autonomie-Rechte (Blacklist)</legend>
+                    <p class="muted" style="font-size:12px">Bei <b>autonomen</b> Läufen gelten die Rechte des Besitzers,
+                       diese Tools/MCP-Server sind aber zusätzlich gesperrt — egal welche Freigaben sonst bestehen.</p>
+                    <div class="row">
+                        <fieldset style="flex:1"><legend>Tools sperren</legend><div id="bl-tools"></div></fieldset>
+                        <fieldset style="flex:1"><legend>MCP-Server sperren</legend><div id="bl-mcps"></div></fieldset>
+                    </div>
+                    <label>Ereignis-Cooldown (s) <input id="auto-cooldown" type="number" min="0" value="30" style="width:90px"></label>
+                    <div class="row"><button id="btn-save-autonomy">Autonomie-Einstellungen speichern</button>
+                        <span id="autonomy-status" class="muted"></span></div>
+                </fieldset>
+            </div>
+
+            <div class="card tab hidden" data-tab="devices">
+                <h2>Geräte / Satelliten</h2>
+                <p class="muted" style="font-size:12px">Alle verbundenen Quellen (Browser, Pi- &amp; ESP-Satelliten).
+                   Satelliten senden ein Lebenszeichen (Heartbeat) inkl. Raum, Lautstärke und WLAN-Signal.</p>
+                <div class="row">
+                    <button id="btn-dev-refresh" class="small">↻ Aktualisieren</button>
+                    <label class="inline"><input type="checkbox" id="dev-auto"> Auto-Refresh (5 s)</label>
+                </div>
+                <div id="devices" style="margin-top:10px"></div>
+            </div>
+
+            <div class="card tab hidden" data-tab="debug">
+                <h2>Debug / Aufzeichnung</h2>
+                <label class="inline"><input type="checkbox" id="cfg-debug-toggle"> Aufzeichnung aktiv</label>
+                <p class="muted" style="font-size:12px">Zeichnet alle Vorgänge auf (STT, Turns, LLM-Aufrufe, Tool-/MCP-Aufrufe
+                   mit Argumenten/Ergebnis/Dauer, Retries, Fehler). Hilft bei Analyse — im Alltag besser aus.</p>
+                <div class="row">
+                    <button id="btn-debug-refresh" class="small">↻ Aktualisieren</button>
+                    <button id="btn-debug-clear" class="small danger">Leeren</button>
+                    <label class="inline"><input type="checkbox" id="debug-auto"> Auto-Refresh (3 s)</label>
+                </div>
+                <pre id="debug-log" style="max-height:55vh;overflow:auto;background:#000d12;border:1px solid #243446;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;margin-top:10px"></pre>
+            </div>
+
+            <div class="card tab hidden" data-tab="mcp">
+                <h2>MCP-Server</h2>
+                <p class="muted" style="font-size:12px">Externe MCP-Server (Streamable HTTP). Ihre Tools stehen dem
+                   Agenten zur Verfügung und lassen sich pro Gruppe als Recht <code>mcp:&lt;name&gt;</code> freigeben.</p>
+                <div id="mcps"></div>
+                <div class="row">
+                    <input id="new-mcp-name" placeholder="Name (z. B. smarthome)">
+                    <input id="new-mcp-url" placeholder="http://host:8000/mcp">
+                    <button id="btn-add-mcp">Hinzufügen</button>
+                    <button id="btn-refresh-mcp" class="small secondary">↻ Aktualisieren</button>
+                </div>
+            </div>
+
+            <!-- System / zentrale Einstellungen -->
+            <div class="card tab" data-tab="system">
+                <h2>System — zentrale Einstellungen</h2>
+                <fieldset><legend>LLM</legend>
+                    <label>LLM-URL <input id="cfg-llm_url"></label>
+                    <label>Chat-/Tool-Modell <input id="cfg-llm_model" placeholder="qwen2.5-7b"></label>
+                    <label>Vision-Modell (nur Bildaufgaben) <input id="cfg-vision_model" placeholder="gemma4-12b"></label>
+                    <div class="row">
+                        <label>max. Tokens <input id="cfg-llm_max_tokens" type="number"></label>
+                        <label>Timeout (s) <input id="cfg-llm_timeout" type="number"></label>
+                    </div>
+                    <label>Denkmodus (gemma4-Reasoning)
+                        <select id="cfg-thinking_mode">
+                            <option value="adaptive">adaptiv – erst schnell ohne Denken, bei Bedarf mit (empfohlen)</option>
+                            <option value="auto">auto – Denken bei Onboarding/Identität oder wenn MCP verfügbar</option>
+                            <option value="never">nie – maximal schnell, schwächer bei komplexen Flows</option>
+                            <option value="always">immer – maximal zuverlässig, aber langsam</option>
+                        </select>
+                    </label>
+                    <label>Denk-Budget (max. Reasoning-Tokens, wenn aktiv) <input id="cfg-thinking_budget" type="number"></label>
+                </fieldset>
+                <fieldset><legend>Sprache zu Text (STT)</legend>
+                    <label>STT-URL <input id="cfg-stt_url"></label>
+                    <label>Modell <input id="cfg-stt_model"></label>
+                    <label>Sprache <input id="cfg-stt_language"></label>
+                </fieldset>
+                <fieldset><legend>Text zu Sprache (TTS)</legend>
+                    <label>Engine
+                        <select id="cfg-tts_engine">
+                            <option value="edge">EdgeTTS (Cloud)</option>
+                            <option value="piper">Piper-DE (CPU, offline)</option>
+                            <option value="kokoro">Kokoro (GPU)</option>
+                        </select>
+                    </label>
+                    <label>EdgeTTS-Stimme <input id="cfg-tts_voice_edge"></label>
+                    <label>Piper-Stimme <input id="cfg-tts_voice_piper"></label>
+                    <label>Kokoro-Stimme <input id="cfg-tts_voice_kokoro"></label>
+                    <label>Kokoro-URL <input id="cfg-tts_url"></label>
+                </fieldset>
+                <fieldset><legend>Stimme</legend>
+                    <label>Sprecher-Schwelle (0–1) <input id="cfg-voice_id_threshold" type="number" step="0.05"></label>
+                    <p class="muted" style="font-size:11px">Embeddings (Gedächtnis/RAG) laufen jetzt lokal auf dem Orchestrator.</p>
+                </fieldset>
+                <fieldset><legend>Code-Sandbox (Tier 3 — eigener Container)</legend>
+                    <p class="muted" style="font-size:11px">JARVIS kann eigenen Code (Python/Shell) ausführen — isoliert
+                       im Container <code>deploy/sandbox</code>, nie auf dem Host. Tools <code>run_python</code>/<code>run_shell</code>
+                       sind über Gruppen-Rechte und die Autonomie-Blacklist steuerbar.</p>
+                    <label class="inline"><input type="checkbox" id="cfg-sandbox_enabled"> Code-Ausführung aktiv</label>
+                    <label class="inline"><input type="checkbox" id="cfg-sandbox_allow_network"> Internet im Sandbox-Code erlauben</label>
+                    <div class="row">
+                        <label>Sandbox-URL <input id="cfg-sandbox_url"></label>
+                        <label>Job-Timeout (s) <input id="cfg-sandbox_timeout_s" type="number"></label>
+                    </div>
+                </fieldset>
+                <fieldset><legend>Messaging-Kanal (Telegram)</legend>
+                    <p class="muted" style="font-size:11px">Fester, geräteunabhängiger Kommunikationsweg: JARVIS meldet
+                       Automatisierungen/Alarme zuverlässig hierher und du kannst ihm über Telegram schreiben.
+                       Bot bei <code>@BotFather</code> anlegen → Token eintragen. Eigene Chat-ID: dem Bot <code>/start</code>
+                       schreiben (er antwortet mit der ID) und pro Nutzer unter „Nutzer" hinterlegen.</p>
+                    <label class="inline"><input type="checkbox" id="tg-enabled"> Telegram aktiv</label>
+                    <label>Bot-Token <input id="tg-token" placeholder="(unverändert lassen = behalten)"></label>
+                    <label>Standard-Chat-ID (Fallback) <input id="tg-default"></label>
+                    <div class="row">
+                        <button id="btn-save-tg">Telegram speichern</button>
+                        <button id="btn-test-tg" class="small secondary">Test senden</button>
+                        <span id="tg-status" class="muted"></span>
+                    </div>
+                    <p class="muted" style="font-size:11px;margin-top:8px">🔒 <b>Sicherheit:</b> JARVIS schreibt
+                       und antwortet ausschließlich an <b>verifizierte</b> (zugeordnete) Chat-IDs. Unbekannte
+                       Absender werden nur hier als „ausstehend" gelistet — keine Antwort, kein Agentenlauf.</p>
+                    <div class="row"><b style="font-size:12px">Ausstehende Kontakte</b>
+                        <button id="btn-refresh-pending" class="small secondary">↻</button></div>
+                    <div id="tg-pending"></div>
+                </fieldset>
+                <fieldset><legend>Desktop-Client-Pakete (Download-Bereich)</legend>
+                    <p class="muted" style="font-size:11px">Auf dem jeweiligen OS gebautes Client-Paket hochladen
+                       (z.B. das Windows-<code>.msi</code> nach <code>cargo tauri build</code>). Es erscheint sofort
+                       unter <a href="/downloads" target="_blank">/downloads</a>. Linux-<code>.deb</code> wird hier
+                       bereits ausgeliefert.</p>
+                    <div class="row">
+                        <select id="cl-platform">
+                            <option value="windows">Windows (.msi/.exe)</option>
+                            <option value="macos">macOS (.dmg)</option>
+                            <option value="linux">Linux (.deb)</option>
+                        </select>
+                        <input type="file" id="cl-file" accept=".msi,.exe,.dmg,.deb">
+                        <button id="btn-cl-upload">Hochladen</button>
+                        <span id="cl-status" class="muted"></span>
+                    </div>
+                </fieldset>
+                <fieldset><legend>System-Prompt</legend>
+                    <label><textarea id="cfg-system_prompt" rows="4"></textarea></label>
+                </fieldset>
+                <div class="row"><button id="btn-save-cfg">Einstellungen speichern</button>
+                    <span id="cfg-status" class="muted"></span></div>
+            </div>
+
+            <div class="card tab hidden" data-tab="groups">
+                <h2>Gruppen &amp; Rechte</h2>
+                <div id="groups"></div>
+                <div class="row">
+                    <input id="new-group" placeholder="Neue Gruppe (Name)">
+                    <label class="inline"><input type="checkbox" id="new-group-admin"> Admin (Vollzugriff)</label>
+                    <button id="btn-add-group">Anlegen</button>
+                </div>
+            </div>
+
+            <div class="card tab hidden" data-tab="users">
+                <h2>Nutzer</h2>
+                <div id="users"></div>
+                <div class="row">
+                    <input id="new-user" placeholder="Benutzername">
+                    <button id="btn-add-user">Anlegen (passwortlos)</button>
+                </div>
+                <p class="muted">Neue Nutzer werden <b>passwortlos</b> angelegt — das Passwort vergeben sie
+                   selbst beim ersten Login. Stimmprofil hier pro Nutzer aufnehmen (🎙).</p>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/admin.js"></script>
+</body>
+</html>

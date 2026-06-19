@@ -1,0 +1,529 @@
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+let RES = { tools: [], mcps: [] };
+let GROUPS = [];
+
+async function api(method, path, body) {
+    const opt = { method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    const r = await fetch(path, opt);
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        const err = new Error(d.detail || r.statusText); err.status = r.status; throw err;
+    }
+    return r.status === 204 ? null : r.json();
+}
+
+function show(view) {
+    for (const v of ["login", "change", "admin"]) $("view-" + v).classList.toggle("hidden", v !== view);
+}
+
+// ── Auth-Flow ─────────────────────────────────────────────────────────────────
+async function init() {
+    try {
+        const me = await api("GET", "/api/admin/me");
+        $("who").textContent = me.username + (me.is_admin ? " (Admin)" : "");
+        $("btn-logout").style.display = "";
+        if (me.must_change) { show("change"); return; }
+        if (!me.is_admin) { show("login"); $("login-err").textContent = "Kein Admin-Zugang."; return; }
+        show("admin"); await loadAdmin();
+    } catch (e) {
+        show("login");
+    }
+}
+
+$("btn-login").onclick = async () => {
+    $("login-err").textContent = "";
+    try {
+        await api("POST", "/api/admin/login", { username: $("login-user").value, password: $("login-pass").value });
+        await init();
+    } catch (e) { $("login-err").textContent = e.message; }
+};
+$("login-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btn-login").click(); });
+
+$("btn-change").onclick = async () => {
+    $("chg-err").textContent = "";
+    const p1 = $("chg-pass").value, p2 = $("chg-pass2").value;
+    if (p1 !== p2) { $("chg-err").textContent = "Passwörter stimmen nicht überein."; return; }
+    if (p1.length < 4) { $("chg-err").textContent = "Mindestens 4 Zeichen."; return; }
+    try { await api("POST", "/api/admin/change-password", { new_password: p1 }); await init(); }
+    catch (e) { $("chg-err").textContent = e.message; }
+};
+
+$("btn-logout").onclick = async () => { await api("POST", "/api/admin/logout"); location.reload(); };
+
+// ── Tab-Navigation ────────────────────────────────────────────────────────────
+document.querySelectorAll(".navbtn").forEach((b) => b.onclick = () => {
+    document.querySelectorAll(".navbtn").forEach((x) => x.classList.toggle("active", x === b));
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("hidden", t.dataset.tab !== b.dataset.tab));
+});
+
+// ── Verwaltung laden/rendern ────────────────────────────────────────────────
+const CFG_KEYS = ["llm_url", "llm_model", "vision_model", "llm_max_tokens", "llm_timeout",
+    "thinking_mode", "thinking_budget", "stt_url", "stt_model",
+    "stt_language", "tts_engine", "tts_voice_edge", "tts_voice_piper", "tts_voice_kokoro", "tts_url",
+    "voice_id_threshold", "system_prompt", "sandbox_url", "sandbox_timeout_s"];
+const CFG_BOOLS = ["sandbox_enabled", "sandbox_allow_network"];
+
+async function loadAdmin() {
+    RES = await api("GET", "/api/admin/resources");
+    GROUPS = (await api("GET", "/api/admin/groups")).groups;
+    renderGroups();
+    await loadUsers();
+    await loadConfig();
+    await loadMcp();
+    await loadDebug();
+    await loadDevices();
+    await loadAutomations();
+    await loadAutonomy();
+}
+
+// ── MCP-Server ────────────────────────────────────────────────────────────────
+async function loadMcp() {
+    const servers = (await api("GET", "/api/admin/mcp")).servers;
+    const el = $("mcps"); el.innerHTML = "";
+    if (!servers.length) el.innerHTML = '<p class="muted">Noch keine MCP-Server.</p>';
+    for (const s of servers) {
+        const div = document.createElement("div"); div.className = "item";
+        const status = s.error ? `<span class="tag" style="background:var(--bad);color:#fff">Fehler</span>`
+                               : `<span class="tag" style="background:var(--ok);color:#04141b">${s.tool_count} Tools</span>`;
+        div.innerHTML = `<div class="head"><span class="name">${s.name} ${status}</span>
+            <button class="small danger" data-delm="${s.name}">Entfernen</button></div>
+            <div class="muted" style="font-size:11px">${s.url}${s.error ? " — " + s.error : ""}</div>`;
+        el.appendChild(div);
+    }
+    el.querySelectorAll("[data-delm]").forEach((b) => b.onclick = async () => {
+        if (confirm("MCP-Server entfernen?")) { await api("POST", "/api/admin/mcp/delete", { name: b.dataset.delm }); await loadAdmin(); }
+    });
+}
+
+$("btn-add-mcp").onclick = async () => {
+    const name = $("new-mcp-name").value.trim(), url = $("new-mcp-url").value.trim();
+    if (!name || !url) return;
+    try { await api("POST", "/api/admin/mcp", { name, url }); $("new-mcp-name").value = ""; $("new-mcp-url").value = ""; await loadAdmin(); }
+    catch (e) { alert(e.message); }
+};
+$("btn-refresh-mcp").onclick = async () => { await api("POST", "/api/admin/mcp/refresh"); await loadAdmin(); };
+
+// ── Debug ─────────────────────────────────────────────────────────────────────
+function fmtEvent(e) {
+    const ts = new Date(e.t * 1000).toLocaleTimeString();
+    const rest = Object.entries(e).filter(([k]) => !["id", "t", "kind"].includes(k))
+        .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
+    return `${ts}  [${e.kind}]  ${rest}`;
+}
+async function loadDebug() {
+    const d = await api("GET", "/api/admin/debug");
+    $("cfg-debug-toggle").checked = d.enabled;
+    $("debug-log").textContent = d.events.length
+        ? d.events.map(fmtEvent).join("\n")
+        : (d.enabled ? "(noch keine Ereignisse — interagiere mit Jarvis)" : "(Aufzeichnung deaktiviert)");
+    $("debug-log").scrollTop = $("debug-log").scrollHeight;
+}
+$("cfg-debug-toggle").onchange = async (e) => { await api("POST", "/api/admin/debug", { enabled: e.target.checked }); loadDebug(); };
+$("btn-debug-refresh").onclick = loadDebug;
+$("btn-debug-clear").onclick = async () => { await api("POST", "/api/admin/debug/clear"); loadDebug(); };
+let _dbgTimer = null;
+$("debug-auto").onchange = (e) => {
+    if (e.target.checked) { _dbgTimer = setInterval(loadDebug, 3000); loadDebug(); }
+    else if (_dbgTimer) { clearInterval(_dbgTimer); _dbgTimer = null; }
+};
+
+// ── Geräte / Satelliten ─────────────────────────────────────────────────────────
+const DEV_ICON = { satellite: "📡", browser: "🖥", "satellite-pi": "🍓", "?": "❓" };
+function fmtAgo(s) {
+    if (s < 60) return Math.round(s) + " s";
+    if (s < 3600) return Math.round(s / 60) + " min";
+    if (s < 86400) return Math.round(s / 3600) + " h";
+    return Math.round(s / 86400) + " d";
+}
+async function loadDevices() {
+    let devs = [];
+    try { devs = (await api("GET", "/api/admin/devices")).devices; } catch { return; }
+    const el = $("devices"); el.innerHTML = "";
+    if (!devs.length) { el.innerHTML = '<p class="muted">Noch keine Geräte verbunden.</p>'; return; }
+    for (const d of devs) {
+        const div = document.createElement("div"); div.className = "item";
+        const dot = d.online
+            ? '<span class="tag" style="background:var(--ok);color:#04141b">● online</span>'
+            : `<span class="tag" style="background:#33404d;color:#9fb3c8">○ offline · vor ${fmtAgo(d.ago_s)}</span>`;
+        const bits = [];
+        if (d.room) bits.push(`Raum: <b>${d.room}</b>`);
+        if (d.volume != null) bits.push(`Lautstärke: ${d.volume}%`);
+        if (d.mic_gain != null) bits.push(`Mic-Gain: ${d.mic_gain} dB`);
+        if (d.rssi != null) bits.push(`WLAN: ${d.rssi} dBm`);
+        if (d.last_speaker) bits.push(`zuletzt erkannt: ${d.last_speaker}`);
+        if (d.fw) bits.push(`FW ${d.fw}`);
+        if (d.render === "pcm") bits.push("Audio: Server-PCM");
+        // Remote-Steuerung nur für verbundene Audio-Geräte (ESP-Satellit)
+        let ctrl = "";
+        if (d.online && (d.type === "satellite" || d.render === "pcm")) {
+            const vol = d.volume != null ? d.volume : 50;
+            const mg = d.mic_gain != null ? d.mic_gain : 30;
+            ctrl = `<div class="dev-ctrl" style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+                <label style="font-size:12px">Lautstärke (%)<br>
+                  <input type="number" min="0" max="90" step="5" value="${vol}" data-ctrl="vol" style="width:70px"></label>
+                <label style="font-size:12px">Mic-Gain (dB)<br>
+                  <input type="number" min="0" max="42" step="1" value="${mg}" data-ctrl="mic" style="width:70px"></label>
+                <button class="small" data-ctrl="apply">Anwenden</button>
+                <span class="muted" data-ctrl="status" style="font-size:11px"></span></div>`;
+        }
+        div.innerHTML = `<div class="head"><span class="name">${DEV_ICON[d.type] || "•"} ${d.name} ${dot}</span>
+            <span class="muted" style="font-size:11px">${d.type} · ${d.session_id}</span></div>
+            <div class="muted" style="font-size:12px">${bits.join(" · ") || "—"}</div>${ctrl}`;
+        if (ctrl) {
+            const btn = div.querySelector('[data-ctrl="apply"]');
+            btn.onclick = async () => {
+                const volume = parseInt(div.querySelector('[data-ctrl="vol"]').value);
+                const mic_gain = parseFloat(div.querySelector('[data-ctrl="mic"]').value);
+                const st = div.querySelector('[data-ctrl="status"]');
+                st.textContent = "…";
+                try {
+                    await api("POST", "/api/admin/devices/control", { session_id: d.session_id, volume, mic_gain });
+                    st.textContent = "✓ gesendet";
+                } catch (e) { st.textContent = "✗ " + (e.message || "Fehler"); }
+            };
+        }
+        el.appendChild(div);
+    }
+}
+$("btn-dev-refresh").onclick = loadDevices;
+let _devTimer = null;
+$("dev-auto").onchange = (e) => {
+    if (e.target.checked) { _devTimer = setInterval(loadDevices, 5000); loadDevices(); }
+    else if (_devTimer) { clearInterval(_devTimer); _devTimer = null; }
+};
+
+// ── Autonomie / Automatisierungen ───────────────────────────────────────────────
+const WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+function initWeekdays() {
+    const el = $("na-weekdays"); if (!el || el.children.length) return;
+    WD.forEach((d, i) => {
+        const lab = document.createElement("label"); lab.className = "inline"; lab.style.marginRight = "6px";
+        lab.innerHTML = `<input type="checkbox" value="${i}" ${i < 5 ? "checked" : ""}>${d}`;
+        el.appendChild(lab);
+    });
+}
+function updateTrigFields() {
+    const t = $("na-type").value;
+    document.querySelectorAll("[data-trig]").forEach((el) => {
+        el.style.display = el.dataset.trig.split(" ").includes(t) ? "" : "none";
+    });
+}
+function buildTrigger() {
+    const t = $("na-type").value;
+    if (t === "once") { const v = $("na-at").value; if (!v) throw new Error("Zeitpunkt fehlt"); return { type: "once", at: new Date(v).getTime() / 1000 }; }
+    if (t === "interval") return { type: "interval", seconds: Math.max(1, parseInt($("na-interval").value || "60")) * 60 };
+    if (t === "daily") return { type: "daily", time: $("na-time").value || "07:00" };
+    if (t === "weekly") { const d = [...document.querySelectorAll("#na-weekdays input:checked")].map((c) => +c.value); return { type: "weekly", time: $("na-time").value || "07:00", weekdays: d.length ? d : [0, 1, 2, 3, 4, 5, 6] }; }
+    const tr = { type: "event", event: $("na-event").value }; const m = $("na-match").value.trim(); if (m) tr.match = m; return tr;
+}
+
+async function loadAutomations() {
+    initWeekdays(); updateTrigFields();
+    const r = await api("GET", "/api/admin/automations");
+    $("auto-scheduler").checked = r.scheduler;
+    const el = $("automations"); el.innerHTML = "";
+    if (!r.automations.length) { el.innerHTML = '<p class="muted">Noch keine Automatisierungen.</p>'; }
+    for (const a of r.automations) {
+        const div = document.createElement("div"); div.className = "item";
+        const badge = a.enabled ? '<span class="tag" style="background:var(--ok);color:#04141b">aktiv</span>'
+                                : '<span class="tag" style="background:#33404d;color:#9fb3c8">aus</span>';
+        const last = a.last_result ? `<div class="muted" style="font-size:11px">zuletzt: ${a.last_result}</div>` : "";
+        div.innerHTML = `<div class="head"><span class="name">${a.title} ${badge}</span>
+            <span><button class="small" data-run="${a.id}">▶ Jetzt</button>
+            <button class="small secondary" data-edit="${a.id}">✎ Bearbeiten</button>
+            <button class="small secondary" data-tog="${a.id}">${a.enabled ? "Deaktivieren" : "Aktivieren"}</button>
+            <button class="small danger" data-del="${a.id}">Löschen</button></span></div>
+            <div class="muted" style="font-size:12px">${a.trigger_text}${a.next_run_text ? " · nächste: " + a.next_run_text : ""}
+            · Läufe: ${a.run_count}</div>
+            <div class="atask" style="font-size:12px;margin-top:3px">${a.task}</div>
+            <div class="aedit" style="display:none;margin-top:6px">
+                <input class="ed-title" value="${a.title.replace(/"/g, "&quot;")}" style="width:100%;margin-bottom:4px">
+                <textarea class="ed-task" rows="3" style="width:100%">${a.task}</textarea>
+                <div class="row"><button class="small" data-save="${a.id}">Speichern</button>
+                    <button class="small secondary" data-cancel="${a.id}">Abbrechen</button></div>
+            </div>${last}`;
+        el.appendChild(div);
+    }
+    el.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => {
+        const item = b.closest(".item");
+        item.querySelector(".atask").style.display = "none";
+        item.querySelector(".aedit").style.display = "";
+    });
+    el.querySelectorAll("[data-cancel]").forEach((b) => b.onclick = () => {
+        const item = b.closest(".item");
+        item.querySelector(".atask").style.display = "";
+        item.querySelector(".aedit").style.display = "none";
+    });
+    el.querySelectorAll("[data-save]").forEach((b) => b.onclick = async () => {
+        const item = b.closest(".item");
+        await api("POST", "/api/admin/automations/update", {
+            id: b.dataset.save,
+            title: item.querySelector(".ed-title").value.trim(),
+            task: item.querySelector(".ed-task").value.trim(),
+        });
+        await loadAutomations();
+    });
+    el.querySelectorAll("[data-run]").forEach((b) => b.onclick = async () => {
+        b.textContent = "läuft…";
+        const res = await api("POST", "/api/admin/automations/run", { id: b.dataset.run });
+        await loadAutomations();
+        alert(res && res.last_result ? "Ergebnis:\n\n" + res.last_result : "Lauf beendet (keine Meldung / SILENT).");
+    });
+    el.querySelectorAll("[data-tog]").forEach((b) => b.onclick = async () => {
+        const a = r.automations.find((x) => x.id === b.dataset.tog);
+        await api("POST", "/api/admin/automations/update", { id: b.dataset.tog, enabled: !a.enabled }); await loadAutomations();
+    });
+    el.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+        if (confirm("Automatisierung löschen?")) { await api("POST", "/api/admin/automations/delete", { id: b.dataset.del }); await loadAutomations(); }
+    });
+}
+$("na-type").onchange = updateTrigFields;
+$("auto-scheduler").onchange = async (e) => { await api("POST", "/api/admin/autonomy", { enabled: e.target.checked }); };
+$("btn-add-automation").onclick = async () => {
+    const task = $("na-task").value.trim(); if (!task) return alert("Bitte eine Aufgabe angeben.");
+    let trigger; try { trigger = buildTrigger(); } catch (e) { return alert(e.message); }
+    const target = $("na-target").value.trim();
+    try {
+        await api("POST", "/api/admin/automations", { title: $("na-title").value.trim(), task, trigger, target_session: target || null });
+        $("na-title").value = ""; $("na-task").value = ""; $("na-target").value = ""; await loadAutomations();
+    } catch (e) { alert(e.message); }
+};
+
+async function loadAutonomy() {
+    const a = await api("GET", "/api/admin/autonomy");
+    $("auto-cooldown").value = a.event_cooldown_s;
+    if (a.events) {
+        $("na-event").innerHTML = a.events.map((e) => `<option value="${e.name}">${e.label}</option>`).join("");
+    }
+    const mk = (host, items, sel) => {
+        const el = $(host); el.innerHTML = items.length ? "" : '<span class="muted" style="font-size:12px">—</span>';
+        for (const it of items) {
+            const lab = document.createElement("label"); lab.className = "inline"; lab.style.display = "block";
+            lab.innerHTML = `<input type="checkbox" value="${it}" ${sel.includes(it) ? "checked" : ""}> ${it}`;
+            el.appendChild(lab);
+        }
+    };
+    mk("bl-tools", a.tools, a.tool_blacklist);
+    mk("bl-mcps", a.mcps, a.mcp_blacklist);
+}
+$("btn-save-autonomy").onclick = async () => {
+    const tools = [...document.querySelectorAll("#bl-tools input:checked")].map((c) => c.value);
+    const mcps = [...document.querySelectorAll("#bl-mcps input:checked")].map((c) => c.value);
+    await api("POST", "/api/admin/autonomy", { tool_blacklist: tools, mcp_blacklist: mcps, event_cooldown_s: +$("auto-cooldown").value });
+    $("autonomy-status").textContent = "✓ gespeichert"; setTimeout(() => $("autonomy-status").textContent = "", 2000);
+};
+
+async function loadConfig() {
+    const cfg = await api("GET", "/api/config");
+    for (const k of CFG_KEYS) { const el = $("cfg-" + k); if (el) el.value = cfg[k] ?? ""; }
+    for (const k of CFG_BOOLS) { const el = $("cfg-" + k); if (el) el.checked = !!cfg[k]; }
+    await loadMessaging();
+}
+
+async function loadMessaging() {
+    const m = await api("GET", "/api/admin/messaging");
+    $("tg-enabled").checked = m.enabled;
+    $("tg-default").value = m.default_chat_id || "";
+    $("tg-token").placeholder = m.has_token ? `gesetzt (${m.token_hint}) — leer lassen = behalten` : "Bot-Token von @BotFather";
+    const bot = m.bot && m.bot.ok ? `· Bot: @${m.bot.result.username}` : "";
+    $("tg-status").textContent = bot;
+    await loadPending();
+}
+
+async function loadPending() {
+    const el = $("tg-pending"); if (!el) return;
+    const pend = (await api("GET", "/api/admin/messaging/pending")).pending;
+    const users = (await api("GET", "/api/admin/users")).users;
+    el.innerHTML = "";
+    if (!pend.length) { el.innerHTML = '<span class="muted" style="font-size:12px">— keine —</span>'; return; }
+    for (const p of pend) {
+        const opts = users.map((u) => `<option value="${u.id}">${u.username}</option>`).join("");
+        const div = document.createElement("div"); div.className = "item";
+        div.innerHTML = `<div class="muted" style="font-size:12px"><b>${p.name || "?"}</b> · Chat-ID <code>${p.chat_id}</code><br>„${p.text}"</div>
+            <div class="row"><select data-puser="${p.chat_id}">${opts}</select>
+            <button class="small" data-passign="${p.chat_id}">Zuordnen</button>
+            <button class="small secondary" data-pdrop="${p.chat_id}">Verwerfen</button></div>`;
+        el.appendChild(div);
+    }
+    el.querySelectorAll("[data-passign]").forEach((b) => b.onclick = async () => {
+        const cid = b.dataset.passign;
+        const uid = +el.querySelector(`[data-puser="${cid}"]`).value;
+        await api("POST", "/api/admin/users/telegram", { id: uid, chat_id: cid });
+        await loadPending(); await loadUsers();
+    });
+    el.querySelectorAll("[data-pdrop]").forEach((b) => b.onclick = async () => {
+        await api("POST", "/api/admin/messaging/pending/clear", { chat_id: b.dataset.pdrop });
+        await loadPending();
+    });
+}
+$("btn-refresh-pending").onclick = loadPending;
+$("btn-save-tg").onclick = async () => {
+    const body = { enabled: $("tg-enabled").checked, default_chat_id: $("tg-default").value.trim() };
+    const tok = $("tg-token").value.trim(); if (tok) body.bot_token = tok;
+    await api("POST", "/api/admin/messaging", body);
+    $("tg-token").value = ""; $("tg-status").textContent = "✓ gespeichert"; await loadMessaging();
+};
+$("btn-cl-upload").onclick = async () => {
+    const f = $("cl-file").files[0];
+    if (!f) { alert("Bitte eine Paketdatei wählen."); return; }
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    fd.append("platform", $("cl-platform").value);
+    $("cl-status").textContent = "Lade hoch…";
+    try {
+        const r = await fetch("/api/admin/client-upload", { method: "POST", body: fd });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+        const d = await r.json();
+        $("cl-status").textContent = `✓ ${d.filename} (${Math.round(d.bytes / 1024)} KB) — unter /downloads verfügbar`;
+        $("cl-file").value = "";
+    } catch (e) { $("cl-status").textContent = "Fehler: " + e.message; }
+};
+$("btn-test-tg").onclick = async () => {
+    const chat = prompt("Chat-ID für Testnachricht (leer = Standard-Chat-ID):", $("tg-default").value.trim());
+    if (chat === null) return;
+    try { const r = await api("POST", "/api/admin/messaging/test", { chat_id: chat.trim() });
+        alert(r.ok ? "✅ Testnachricht gesendet." : "❌ Senden fehlgeschlagen (Token/Chat-ID prüfen)."); }
+    catch (e) { alert(e.message); }
+};
+
+$("btn-save-cfg").onclick = async () => {
+    const patch = {};
+    for (const k of CFG_KEYS) { const el = $("cfg-" + k); if (el) patch[k] = el.value; }
+    for (const k of CFG_BOOLS) { const el = $("cfg-" + k); if (el) patch[k] = el.checked; }
+    $("cfg-status").textContent = "Speichere…";
+    try { await api("POST", "/api/config", patch); $("cfg-status").textContent = "✓ gespeichert"; }
+    catch (e) { $("cfg-status").textContent = "Fehler: " + e.message; }
+};
+
+function renderGroups() {
+    const el = $("groups"); el.innerHTML = "";
+    for (const g of GROUPS) {
+        const div = document.createElement("div"); div.className = "item";
+        let checks = "";
+        if (g.is_admin) {
+            checks = '<p class="muted">Admin-Gruppe: Vollzugriff auf alle Tools/MCPs.</p>';
+        } else {
+            const all = [...RES.tools, ...(RES.mcps || [])];
+            checks = '<div class="checks">' + all.map((res) => {
+                const on = g.permissions.includes(res) ? "checked" : "";
+                const label = res.startsWith("mcp:") ? "🔌 " + res.slice(4) : res.replace("tool:", "");
+                return `<label><input type="checkbox" data-gid="${g.id}" value="${res}" ${on}> ${label}</label>`;
+            }).join("") + "</div>";
+        }
+        div.innerHTML = `<div class="head"><span class="name">${g.name}${g.is_admin ? '<span class="tag">ADMIN</span>' : ""}</span>
+            <span>${g.is_admin ? "" : `<button class="small" data-save="${g.id}">Rechte speichern</button> `}
+            <button class="small danger" data-delg="${g.id}">Löschen</button></span></div>${checks}`;
+        el.appendChild(div);
+    }
+    el.querySelectorAll("[data-save]").forEach((b) => b.onclick = () => saveGroupPerms(+b.dataset.save));
+    el.querySelectorAll("[data-delg]").forEach((b) => b.onclick = () => delGroup(+b.dataset.delg));
+}
+
+async function saveGroupPerms(gid) {
+    const res = [...document.querySelectorAll(`input[data-gid="${gid}"]:checked`)].map((c) => c.value);
+    await api("POST", "/api/admin/groups/permissions", { id: gid, resources: res });
+    await loadAdmin();
+}
+async function delGroup(gid) { if (confirm("Gruppe löschen?")) { await api("POST", "/api/admin/groups/delete", { id: gid }); await loadAdmin(); } }
+
+$("btn-add-group").onclick = async () => {
+    const name = $("new-group").value.trim(); if (!name) return;
+    await api("POST", "/api/admin/groups", { name, is_admin: $("new-group-admin").checked });
+    $("new-group").value = ""; $("new-group-admin").checked = false; await loadAdmin();
+};
+
+async function loadUsers() {
+    const users = (await api("GET", "/api/admin/users")).users;
+    const el = $("users"); el.innerHTML = "";
+    for (const u of users) {
+        const div = document.createElement("div"); div.className = "item";
+        const gchecks = GROUPS.map((g) =>
+            `<label><input type="checkbox" data-uid="${u.id}" value="${g.id}" ${u.groups.includes(g.name) ? "checked" : ""}> ${g.name}</label>`
+        ).join("");
+        const vp = u.voice_samples || 0;
+        const pwTag = u.has_password
+            ? '<span class="tag" style="background:#243446;color:var(--muted)">🔑 PW</span>'
+            : '<span class="tag" style="background:var(--warn);color:#04141b">kein PW</span>';
+        div.innerHTML = `<div class="head"><span class="name">${u.username} ${pwTag}
+            <span class="tag" style="background:${vp ? 'var(--ok)' : '#243446'};color:${vp ? '#04141b' : 'var(--muted)'}">🎙 ${vp}</span></span>
+            <span><button class="small" data-savu="${u.id}">Gruppen speichern</button>
+            <button class="small" data-resu="${u.id}">PW zurücksetzen</button>
+            <button class="small danger" data-delu="${u.id}">Löschen</button></span></div>
+            <div class="checks">${gchecks || '<span class="muted">Keine Gruppen vorhanden</span>'}</div>
+            <div class="row"><button class="small" data-rec="${u.id}" data-name="${u.username}">🎙 Stimme aufnehmen (3–5 s)</button>
+            <button class="small danger" data-clrv="${u.id}">Stimmprofil löschen</button>
+            <span class="muted" data-recst="${u.id}"></span></div>
+            <div class="row"><label class="inline" style="flex:1">✈ Telegram-Chat-ID
+                <input data-tgid="${u.id}" value="${u.telegram_chat_id || ''}" placeholder="z. B. 123456789" style="width:160px"></label>
+            <button class="small" data-savtg="${u.id}">ID speichern</button></div>`;
+        el.appendChild(div);
+    }
+    el.querySelectorAll("[data-savtg]").forEach((b) => b.onclick = async () => {
+        const v = document.querySelector(`[data-tgid="${b.dataset.savtg}"]`).value.trim();
+        await api("POST", "/api/admin/users/telegram", { id: +b.dataset.savtg, chat_id: v });
+        b.textContent = "✓"; setTimeout(() => b.textContent = "ID speichern", 1500);
+    });
+    el.querySelectorAll("[data-savu]").forEach((b) => b.onclick = () => saveUserGroups(+b.dataset.savu));
+    el.querySelectorAll("[data-resu]").forEach((b) => b.onclick = () => resetPw(+b.dataset.resu));
+    el.querySelectorAll("[data-delu]").forEach((b) => b.onclick = () => delUser(+b.dataset.delu));
+    el.querySelectorAll("[data-rec]").forEach((b) => b.onclick = () => recordVoice(+b.dataset.rec));
+    el.querySelectorAll("[data-clrv]").forEach((b) => b.onclick = () => clearVoice(+b.dataset.clrv));
+}
+
+async function clearVoice(uid) {
+    if (!confirm("Stimmprofil dieses Nutzers löschen?")) return;
+    await api("POST", "/api/admin/users/clear-voice", { id: uid });
+    await loadUsers();
+}
+
+async function recordVoice(uid) {
+    const stEl = document.querySelector(`[data-recst="${uid}"]`);
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const rec = new MediaRecorder(stream);
+        const chunks = [];
+        rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+        rec.onstop = async () => {
+            stream.getTracks().forEach((t) => t.stop());
+            stEl.textContent = "Verarbeite…";
+            try {
+                const fd = new FormData();
+                fd.append("file", new Blob(chunks, { type: rec.mimeType || "audio/webm" }), "voice.webm");
+                fd.append("user_id", uid);
+                const r = await fetch("/api/admin/users/enroll-voice", { method: "POST", body: fd, credentials: "same-origin" });
+                if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+                const d = await r.json();
+                stEl.textContent = `✓ gespeichert (${d.samples} Aufnahmen)`;
+                loadUsers();
+            } catch (e) { stEl.textContent = "Fehler: " + e.message; }
+        };
+        rec.start();
+        stEl.textContent = "🔴 Aufnahme… (5 s) — sprich einen Satz";
+        setTimeout(() => { if (rec.state === "recording") rec.stop(); }, 5000);
+    } catch (e) {
+        stEl.textContent = "Mikrofon nicht verfügbar: " + e.message;
+    }
+}
+
+async function saveUserGroups(uid) {
+    const ids = [...document.querySelectorAll(`input[data-uid="${uid}"]:checked`)].map((c) => +c.value);
+    await api("POST", "/api/admin/users/groups", { id: uid, group_ids: ids });
+    await loadUsers();
+}
+async function resetPw(uid) {
+    const p = prompt("Neues Initialpasswort (Nutzer muss es danach ändern):"); if (!p) return;
+    await api("POST", "/api/admin/users/reset-password", { id: uid, password: p }); await loadUsers();
+}
+async function delUser(uid) { if (confirm("Nutzer löschen?")) { await api("POST", "/api/admin/users/delete", { id: uid }); await loadUsers(); } }
+
+$("btn-add-user").onclick = async () => {
+    const username = $("new-user").value.trim();
+    if (!username) return;
+    try { await api("POST", "/api/admin/users", { username }); $("new-user").value = ""; await loadUsers(); }
+    catch (e) { alert(e.message); }
+};
+
+init();

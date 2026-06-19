@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SH-Jarvis · Client</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <span class="logo">◈</span>
+    <div><h1>SH-Jarvis · Client</h1><span class="sub">Desktop-Agent</span></div>
+    <span id="status" class="status">…</span>
+  </header>
+
+  <nav>
+    <button class="tab active" data-tab="settings">Einstellungen</button>
+    <button class="tab" data-tab="policy">Berechtigungen</button>
+    <button class="tab" data-tab="audit">Protokoll</button>
+  </nav>
+
+  <main>
+    <section data-tab="settings" class="panel">
+      <label>Orchestrator-URL <input id="server" placeholder="wss://192.168.66.224:8088"></label>
+      <label>Gerätename <input id="name" placeholder="Arbeits-PC"></label>
+      <label class="row"><input type="checkbox" id="allow_shell"> Shell-Befehle erlauben (<code>shell.run</code>)</label>
+      <label class="row"><input type="checkbox" id="verify_tls"> TLS-Zertifikat prüfen (aus = selbstsigniert/LAN)</label>
+      <hr>
+      <p class="muted">Sidecar ist <b>in der App enthalten</b> und startet automatisch — die folgenden Felder
+        sind <b>optional</b> (nur für Sonderfälle/Override). Standard: mitgelieferte
+        <code>jarvis-client.py</code> mit System-Python (<code>python3</code>/<code>python</code>); liegt eine
+        mitgelieferte Binary vor, wird sie python-frei genutzt.</p>
+      <label>Python-Befehl (optional, Standard automatisch) <input id="python_cmd" placeholder="automatisch"></label>
+      <label>Eigener Sidecar-Pfad (optional, überschreibt den mitgelieferten)
+        <input id="script_path" placeholder="leer = mitgelieferter Sidecar"></label>
+      <div class="actions">
+        <button id="save-settings">Speichern &amp; Sidecar (neu) starten</button>
+        <span id="settings-status" class="muted"></span>
+      </div>
+    </section>
+
+    <section data-tab="policy" class="panel hidden">
+      <p class="muted">Lokale Sicherheits-Richtlinie (<code>policy.json</code>): je Aktion
+        <b>allow</b>/<b>ask</b>/<b>deny</b>, optionale Pfad-Scopes. Der Client setzt das selbst durch —
+        auch wenn der Server etwas anderes schickt.</p>
+      <textarea id="policy" spellcheck="false"></textarea>
+      <div class="actions">
+        <button id="save-policy">Richtlinie speichern</button>
+        <button id="reload-policy" class="secondary">Neu laden</button>
+        <span id="policy-status" class="muted"></span>
+      </div>
+    </section>
+
+    <section data-tab="audit" class="panel hidden">
+      <p class="muted">Letzte 100 protokollierten Entscheidungen (lokales Audit-Log).</p>
+      <div class="actions"><button id="reload-audit" class="secondary">Aktualisieren</button></div>
+      <pre id="audit"></pre>
+    </section>
+  </main>
+
+  <script src="main.js"></script>
+</body>
+</html>

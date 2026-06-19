@@ -1,0 +1,52 @@
+# ── Secrets / lokale Konfiguration (NIE committen) ─────────────────────────────
+orchestrator/certs/
+**/key.pem
+**/cert.pem
+orchestrator/config.json
+orchestrator/automations.json
+**/*.token
+**/secrets*.json
+.env
+*.env
+
+# ── Laufzeit-/Nutzerdaten ──────────────────────────────────────────────────────
+orchestrator/piper_voices/
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── ESP-IDF / Firmware-Build-Artefakte ─────────────────────────────────────────
+# Quelle: deploy/satellite-esp/ (nur sdkconfig.defaults wird versioniert, nicht das generierte sdkconfig)
+deploy/satellite-esp/build/
+deploy/satellite-esp/managed_components/
+deploy/satellite-esp/dependencies.lock
+deploy/satellite-esp/sdkconfig
+deploy/satellite-esp/sdkconfig.old
+**/build_log.txt
+**/*.log
+
+# ── Tauri-Desktop-Client (Build-Artefakte, ~GB) ───────────────────────────────
+deploy/desktop/dist/
+deploy/desktop/src-tauri/target/
+deploy/desktop/**/node_modules/
+**/*.deb
+**/*.msi
+**/*.AppImage
+
+# ── Tooling / lokale Konfiguration ─────────────────────────────────────────────
+.claude/
+
+# ── Editor / OS ────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

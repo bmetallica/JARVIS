@@ -1,0 +1,42 @@
+    # German Kokoro TTS (Martin voice) as an OS-independent Docker service.
+# Exposes an OpenAI-compatible /v1/audio/speech endpoint that MARK XL calls
+# over HTTP — so espeak-ng and all model dependencies stay inside Linux and
+# your Windows host stays clean.
+#
+# Model: Godelaune/Kokoro-82M-ONNX-German-Martin
+#   - ONNX runtime (no PyTorch needed inside the container)
+#   - built-in German text normalisation ("ca." -> "circa", dates, etc.)
+#
+# Usage:
+#   1. Install Docker Desktop (WSL2 backend) on Windows.
+#   2. From this folder:  docker compose up -d --build
+#   3. In MARK XL Configure -> TTS -> "DE-Server",
+#      Server-URL: http://localhost:8080 , Voice: dm_martin
+#
+# Stop:    docker compose down
+# Logs:    docker compose logs -f
+#
+# NOTE: The image/build context below points at the upstream repo.  If the
+# upstream Dockerfile layout changes, clone it manually instead:
+#   git clone https://github.com/Godelaune/Kokoro-82M-ONNX-German-Martin
+#   cd Kokoro-82M-ONNX-German-Martin && docker compose up -d
+services:
+  german-tts:
+    build:
+      context: https://github.com/Godelaune/Kokoro-82M-ONNX-German-Martin.git#main
+    container_name: mark-xl-german-tts
+    ports:
+      - "8080:8080"          # host:container — change the host side if 8080 is taken
+    restart: unless-stopped
+    environment:
+      # Default voice if the request omits one. dm_martin (M) / df_victoria (F) / df_eva (F)
+      - DEFAULT_VOICE=dm_martin
+    # GPU is optional and fiddly on Windows; CPU is fine for Kokoro.
+    # To try GPU passthrough (WSL2 + nvidia-container-toolkit), uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

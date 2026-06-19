@@ -1,0 +1,118 @@
+# ============================================================================
+#  SH-Mark-XL — TIER 2: INFERENCE (GPU-Server)
+#  Alle GPU-Lasten an einem Ort: LLM + Vision (Ollama), STT (Whisper, DE),
+#  TTS (deutscher Kokoro).  Der Orchestrator (Tier 1) spricht diese Dienste
+#  über das private Netz an.
+#
+#  Voraussetzungen auf dem GPU-Server:
+#    • Docker + Docker Compose v2
+#    • NVIDIA-Treiber + nvidia-container-toolkit  (Test: `nvidia-smi`)
+#
+#  Start:    docker compose -f docker-compose.gpu.yml up -d
+#  Modelle:  docker compose -f docker-compose.gpu.yml --profile init up ollama-init
+#  Logs:     docker compose -f docker-compose.gpu.yml logs -f
+#  Stop:     docker compose -f docker-compose.gpu.yml down
+#
+#  ⚠️  SICHERHEIT: Diese Dienste haben KEINE eigene Authentifizierung.
+#      NICHT direkt ins Internet exposen!  Nur erreichbar machen über
+#      ein privates Netz (WireGuard/Tailscale) ODER hinter der Firewall
+#      im LAN.  BIND_ADDR in .env steuert, an welche Adresse gebunden wird
+#      (Default 0.0.0.0 = alle Interfaces — im LAN/VPN ok, sonst einschränken).
+# ============================================================================
+
+name: shmarkxl-gpu
+
+x-gpu: &gpu                       # wiederverwendbarer GPU-Reservierungsblock
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all              # alternativ: count: 1  (nur eine GPU)
+          capabilities: [gpu]
+
+services:
+
+  # ── LLM + Vision (OPTIONAL) ─────────────────────────────────────────────────
+  # Nur nötig, wenn KEIN eigener OpenAI-kompatibler LLM-Server läuft.
+  # Aktueller Setup nutzt llama.cpp auf :8080 → Ollama bleibt standardmäßig AUS.
+  # Bei Bedarf starten mit:  docker compose ... --profile ollama up -d ollama
+  ollama:
+    image: ollama/ollama:latest
+    container_name: shmarkxl-ollama
+    profiles: ["ollama"]
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_KEEP_ALIVE=-1       # Modell resident halten (passt zu warmup_model keep_alive=-1)
+    deploy: *gpu
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # ── STT — faster-whisper, OpenAI-kompatibel (/v1/audio/transcriptions) ──────
+  # Deutsches Modell als Default; das Feld `language` wird durchgereicht.
+  # Alternative zum Image: ghcr.io/speaches-ai/speaches (Nachfolgeprojekt).
+  stt:
+    image: fedirz/faster-whisper-server:latest-cuda
+    container_name: shmarkxl-stt
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:8001:8000"   # Host 8001 → Container 8000
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      - WHISPER__MODEL=${STT_MODEL:-jimmymeister/whisper-large-v3-turbo-german-ct2}
+      - WHISPER__INFERENCE_DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=float16
+      - WHISPER__DEFAULT_LANGUAGE=de
+    deploy: *gpu
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ── TTS — deutscher Kokoro (ONNX), OpenAI-kompatibel (/v1/audio/speech) ─────
+  # Stimmen: dm_martin (M) · df_victoria (F) · df_eva (F).  Baut aus Upstream-Repo.
+  # GPU bei Kokoro optional (läuft auf CPU brauchbar) → bewusst KEIN *gpu-Block.
+  tts:
+    build:
+      context: https://github.com/Godelaune/Kokoro-82M-ONNX-German-Martin.git#main
+    container_name: shmarkxl-tts
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${TTS_PORT:-8002}:8080"   # Host 8002 → Container 8080 (8080 ist von llama.cpp belegt)
+    environment:
+      - DEFAULT_VOICE=${TTS_VOICE:-dm_martin}
+
+  # ── (optional) Einmaliger Modell-Puller für Ollama ─────────────────────────
+  # Lädt LLM + Vision-Modell in den ollama-Container.  Läuft NUR mit:
+  #   docker compose -f docker-compose.gpu.yml --profile init up ollama-init
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: shmarkxl-ollama-init
+    profiles: ["init"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        ollama pull ${LLM_MODEL:-qwen2.5:7b} &&
+        ollama pull ${VISION_MODEL:-qwen2.5vl:7b}
+    restart: "no"
+
+volumes:
+  ollama_models:
+  hf_cache:
