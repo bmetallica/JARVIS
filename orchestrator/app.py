@@ -35,6 +35,7 @@ import mcp_hub
 import debug
 import automations
 import watchers
+import skills
 import messaging
 from session_hub import hub
 
@@ -256,6 +257,7 @@ async def _prepare_turn(req: ChatRequest):
     except Exception:
         pass
 
+    system += skills.catalog_hint()           # deferred: nur Namen+Beschreibung der vorhandenen Skills
     working = [{"role": "system", "content": system}] + list(hub.history(sid)) + \
               [{"role": "user", "content": req.message}]
     available_tools = tools.TOOL_SCHEMAS + mcp_hub.tool_schemas()
@@ -591,7 +593,7 @@ async def _automation_llm_run(autom: dict, payload: dict | None, extra_user: str
               "Erledige sie selbstständig mit den verfügbaren Werkzeugen. "
               "Gibt es nach Erledigung NICHTS Berichtenswertes für den Nutzer, antworte AUSSCHLIESSLICH mit dem Wort "
               "SILENT. Andernfalls formuliere eine kurze, natürliche deutsche Meldung, die dem Nutzer proaktiv "
-              "mitgeteilt wird." + _now_hint() + sat + ctxinfo)
+              "mitgeteilt wird." + _now_hint() + sat + ctxinfo + skills.catalog_hint())
     user_msg = autom["task"] + (("\n\n" + extra_user) if extra_user else "")
     working = [{"role": "system", "content": system}, {"role": "user", "content": user_msg}]
     available = tools.TOOL_SCHEMAS + mcp_hub.tool_schemas()
@@ -1150,6 +1152,46 @@ def admin_automation_delete(body: dict, jarvis_admin_token: str | None = Cookie(
 async def admin_automation_run(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
     _admin(jarvis_admin_token)
     return await automations.manager.run_now((body or {}).get("id", ""))
+
+
+# ── Selbst-gebaute Skills (global; Admin kann editieren/deaktivieren/löschen) ──
+@app.get("/api/admin/skills")
+def admin_skills(jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    return {"skills": skills.list_all()}
+
+
+@app.post("/api/admin/skills/update")
+async def admin_skill_update(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    b = body or {}
+    s = skills.get(b.get("name", ""))
+    if not s:
+        raise HTTPException(status_code=404, detail="Unbekanntes Skill.")
+    if b.get("code") is not None:                      # geänderter Code wird vor dem Speichern getestet
+        test = await asyncio.to_thread(skills.run_skill_code, b["code"], b.get("test_args") or {},
+                                       "skills", bool(b.get("net", s.get("net"))))
+        if not test["ok"]:
+            raise HTTPException(status_code=400, detail="Code-Test fehlgeschlagen: " + test["error"])
+    fields = {k: b[k] for k in ("description", "code", "net", "enabled") if k in b}
+    return skills.update(s["name"], **fields)
+
+
+@app.post("/api/admin/skills/delete")
+def admin_skill_delete(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    return {"ok": skills.delete((body or {}).get("name", ""))}
+
+
+@app.post("/api/admin/skills/run")
+async def admin_skill_run(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    b = body or {}
+    s = skills.get(b.get("name", ""))
+    if not s:
+        raise HTTPException(status_code=404, detail="Unbekanntes Skill.")
+    return await asyncio.to_thread(skills.run_skill_code, s["code"], b.get("args") or {},
+                                   "skills", s.get("net", False))
 
 
 @app.get("/api/admin/autonomy")

@@ -50,6 +50,7 @@
                 <button class="navbtn" data-tab="mcp">🔌 MCP-Server</button>
                 <button class="navbtn" data-tab="devices">📡 Geräte</button>
                 <button class="navbtn" data-tab="autonomy">🤖 Autonomie</button>
+                <button class="navbtn" data-tab="skills">🧰 Skills</button>
                 <button class="navbtn" data-tab="debug">🐞 Debug</button>
             </nav>
 
@@ -104,6 +105,15 @@
                     <div class="row"><button id="btn-save-autonomy">Autonomie-Einstellungen speichern</button>
                         <span id="autonomy-status" class="muted"></span></div>
                 </fieldset>
+            </div>
+
+            <div class="card tab hidden" data-tab="skills">
+                <h2>Selbst-gebaute Skills 🧰</h2>
+                <p class="muted" style="font-size:12px">Wiederverwendbare Werkzeuge, die JARVIS selbst aus Python-Code
+                   baut und in der gehärteten Sandbox ausführt. Global für alle Nutzer. Du kannst sie hier
+                   deaktivieren, den Code bearbeiten (wird vor dem Speichern getestet), testweise ausführen oder löschen.</p>
+                <div class="row"><button id="btn-skills-refresh" class="small">↻ Aktualisieren</button></div>
+                <div id="skills" style="margin-top:10px"></div>
             </div>
 
             <div class="card tab hidden" data-tab="devices">

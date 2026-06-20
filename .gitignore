@@ -4,6 +4,7 @@ orchestrator/certs/
 **/cert.pem
 orchestrator/config.json
 orchestrator/automations.json
+orchestrator/skills.json
 **/*.token
 **/secrets*.json
 .env

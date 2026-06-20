@@ -24,6 +24,7 @@ import mcp_hub
 import messaging
 import sandbox
 import services
+import skills
 import timers
 import watchers
 from session_hub import hub
@@ -396,6 +397,88 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "create_skill",
+            "description": "Baut ein WIEDERVERWENDBARES Werkzeug (Skill) aus Python-Code, das danach jederzeit per "
+                           "run_skill aufgerufen werden kann — ideal für wiederkehrende Aufgaben, die du effizienter "
+                           "erledigen willst, statt jedes Mal neu zu überlegen. Der Code wird VOR dem Speichern getestet.\n\n"
+                           + skills.SKILL_CONTRACT,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Kurzer Name (Kleinbuchstaben/Unterstriche), z.B. 'paketstatus'."},
+                    "description": {"type": "string", "description": "Was das Skill tut und wann man es nutzt."},
+                    "code": {"type": "string", "description": "Python-Code gemäß Vertrag (liest `args`, ruft `result(...)`)."},
+                    "params": {"type": "object", "description": "Beschreibung der Argumente, z.B. {\"stadt\": \"Stadtname\"}."},
+                    "test_args": {"type": "object", "description": "Beispiel-Argumente zum Testlauf vor dem Speichern."},
+                    "net": {"type": "boolean", "description": "true, wenn das Skill ins Internet darf (Standard false)."},
+                },
+                "required": ["name", "description", "code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_skill",
+            "description": "Führt ein vorhandenes selbst-gebautes Skill mit Argumenten aus und gibt dessen Ergebnis zurück.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name des Skills."},
+                    "args": {"type": "object", "description": "Argumente für das Skill (passend zu seinen params)."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_skills",
+            "description": "Sucht in den vorhandenen Skills (nach Name/Beschreibung). Leere Suche listet alle.",
+            "parameters": {"type": "object",
+                           "properties": {"query": {"type": "string", "description": "Suchbegriff (optional)."}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_skill",
+            "description": "Zeigt Beschreibung, Parameter und Code eines Skills — vor dem Aufruf oder zum Anpassen.",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_skill",
+            "description": "Ändert ein vorhandenes Skill (Code/Beschreibung/Parameter/Netz/aktiviert). Code wird vor dem Speichern getestet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "code": {"type": "string"},
+                    "params": {"type": "object"},
+                    "test_args": {"type": "object", "description": "Beispiel-Argumente zum Testen geänderten Codes."},
+                    "net": {"type": "boolean"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_skill",
+            "description": "Löscht ein selbst-gebautes Skill.",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_automations",
             "description": "Listet die eingerichteten autonomen Aufgaben des aktuellen Nutzers (Titel, Auslöser, "
                            "nächste Ausführung).",
@@ -611,6 +694,60 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
 
     if name == "create_watch_automation":
         return await _create_watch_automation(args, ctx, sid)
+
+    # ── Selbst-gebaute Skills ─────────────────────────────────────────────────
+    if name == "create_skill":
+        sname = skills.sanitize_name(args.get("name") or "")
+        code = (args.get("code") or "").strip()
+        if not sname or not code:
+            return "Mir fehlen Name oder Code für das Skill."
+        test = await asyncio.to_thread(skills.run_skill_code, code, args.get("test_args") or {}, ns, bool(args.get("net")))
+        if not test["ok"]:
+            return ("Das Skill läuft noch nicht sauber — korrigiere den Code und rufe create_skill erneut auf:\n"
+                    + test["error"])
+        s = skills.create(sname, args.get("description") or "", code, params=args.get("params") or {},
+                          owner_user_id=ctx.get("user_id"), net=bool(args.get("net")))
+        return (f"Skill „{s['name']}“ (v{s['version']}) angelegt und getestet. "
+                f"Aufruf künftig via run_skill name=\"{s['name']}\". Testergebnis: {test['result']}")
+
+    if name == "run_skill":
+        s = skills.get(args.get("name") or "")
+        if not s or not s.get("enabled"):
+            return f"Kein aktives Skill „{args.get('name')}“. Mit search_skills suchen oder create_skill bauen."
+        r = await asyncio.to_thread(skills.run_skill_code, s["code"], args.get("args") or {}, ns, s.get("net", False))
+        skills.record_run(s["name"], r["ok"], r.get("error"))
+        if not r["ok"]:
+            return f"Skill „{s['name']}“ Fehler: {r['error']}"
+        return f"Ergebnis von {s['name']}: {r['result']}"
+
+    if name == "search_skills":
+        found = skills.search(args.get("query") or "")
+        if not found:
+            return "Keine passenden Skills vorhanden. Du kannst mit create_skill ein neues bauen."
+        return "Skills:\n" + "\n".join(f"- {s['name']}: {s['description']}" for s in found)
+
+    if name == "describe_skill":
+        s = skills.get(args.get("name") or "")
+        if not s:
+            return "Unbekanntes Skill."
+        return (f"Skill {s['name']} (v{s.get('version', 1)}, Läufe {s.get('run_count', 0)}, "
+                f"Netz {s.get('net')}):\n{s['description']}\nParameter: {s.get('params') or {}}\nCode:\n{s['code']}")
+
+    if name == "update_skill":
+        s = skills.get(args.get("name") or "")
+        if not s:
+            return "Unbekanntes Skill."
+        if args.get("code"):
+            test = await asyncio.to_thread(skills.run_skill_code, args["code"], args.get("test_args") or {},
+                                           ns, bool(args.get("net", s.get("net"))))
+            if not test["ok"]:
+                return "Der geänderte Code läuft nicht sauber:\n" + test["error"]
+        fields = {k: args[k] for k in ("description", "code", "params", "net", "enabled") if k in args}
+        skills.update(s["name"], **fields)
+        return f"Skill „{s['name']}“ aktualisiert."
+
+    if name == "delete_skill":
+        return "Skill gelöscht." if skills.delete(args.get("name") or "") else "Unbekanntes Skill."
 
     if name == "list_automations":
         items = automations.manager.list(ctx.get("user_id"))

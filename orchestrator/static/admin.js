@@ -77,6 +77,7 @@ async function loadAdmin() {
     await loadDevices();
     await loadAutomations();
     await loadAutonomy();
+    await loadSkills();
 }
 
 // ── MCP-Server ────────────────────────────────────────────────────────────────
@@ -323,6 +324,67 @@ $("btn-save-autonomy").onclick = async () => {
     await api("POST", "/api/admin/autonomy", { tool_blacklist: tools, mcp_blacklist: mcps, event_cooldown_s: +$("auto-cooldown").value });
     $("autonomy-status").textContent = "✓ gespeichert"; setTimeout(() => $("autonomy-status").textContent = "", 2000);
 };
+
+// ── Selbst-gebaute Skills ───────────────────────────────────────────────────────
+function escHtml(s) { return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function parseJsonField(el) { const v = (el.value || "").trim(); return v ? JSON.parse(v) : {}; }
+
+async function loadSkills() {
+    let list = [];
+    try { list = (await api("GET", "/api/admin/skills")).skills; } catch { return; }
+    const el = $("skills"); el.innerHTML = "";
+    if (!list.length) {
+        el.innerHTML = '<p class="muted">Noch keine Skills. JARVIS baut sie selbst per Chat — z.B. „bau dir ein Skill, das …“.</p>';
+        return;
+    }
+    for (const s of list) {
+        const div = document.createElement("div"); div.className = "item";
+        const on = s.enabled ? '<span class="tag" style="background:var(--ok);color:#04141b">aktiv</span>'
+                             : '<span class="tag" style="background:#33404d;color:#9fb3c8">aus</span>';
+        const net = s.net ? '<span class="tag" style="background:#2a3f5f;color:#9fc3ff">🌐 Netz</span>' : "";
+        const fail = s.fail_count ? ` · <span style="color:var(--bad)">Fehler: ${s.fail_count}</span>` : "";
+        div.innerHTML = `<div class="head"><span class="name">${s.name} ${on} ${net}</span>
+            <span><button class="small" data-srun="${s.name}">▶ Test</button>
+            <button class="small secondary" data-stog="${s.name}">${s.enabled ? "Deaktivieren" : "Aktivieren"}</button>
+            <button class="small secondary" data-ssave="${s.name}">💾 Code speichern</button>
+            <button class="small danger" data-sdel="${s.name}">Löschen</button></span></div>
+            <div class="muted" style="font-size:12px">${escHtml(s.description)} · v${s.version} · Läufe: ${s.run_count}${fail}</div>
+            <textarea data-scode="${s.name}" rows="6" style="width:100%;font-family:monospace;font-size:11px;margin-top:6px">${escHtml(s.code)}</textarea>
+            <div class="row" style="margin-top:4px">
+              <label class="inline" style="font-size:11px"><input type="checkbox" data-snet="${s.name}" ${s.net ? "checked" : ""}> Netz erlaubt</label>
+              <input data-sargs="${s.name}" placeholder='Argumente JSON, z.B. {"a":1,"b":2}' style="flex:1;font-size:11px">
+            </div>
+            <div class="muted" data-sstatus="${s.name}" style="font-size:11px;margin-top:3px"></div>`;
+        el.appendChild(div);
+    }
+    el.querySelectorAll("[data-stog]").forEach((b) => b.onclick = async () => {
+        const s = list.find((x) => x.name === b.dataset.stog);
+        await api("POST", "/api/admin/skills/update", { name: b.dataset.stog, enabled: !s.enabled }); await loadSkills();
+    });
+    el.querySelectorAll("[data-sdel]").forEach((b) => b.onclick = async () => {
+        if (confirm("Skill löschen?")) { await api("POST", "/api/admin/skills/delete", { name: b.dataset.sdel }); await loadSkills(); }
+    });
+    el.querySelectorAll("[data-ssave]").forEach((b) => b.onclick = async () => {
+        const name = b.dataset.ssave;
+        const st = el.querySelector(`[data-sstatus="${name}"]`); st.textContent = "teste…";
+        const code = el.querySelector(`[data-scode="${name}"]`).value;
+        const net = el.querySelector(`[data-snet="${name}"]`).checked;
+        let test_args; try { test_args = parseJsonField(el.querySelector(`[data-sargs="${name}"]`)); }
+        catch { st.textContent = "Argumente sind kein gültiges JSON."; return; }
+        try { await api("POST", "/api/admin/skills/update", { name, code, net, test_args }); st.textContent = "✓ gespeichert (getestet)"; await loadSkills(); }
+        catch (e) { st.textContent = "✗ " + (e.message || "Fehler"); }
+    });
+    el.querySelectorAll("[data-srun]").forEach((b) => b.onclick = async () => {
+        const name = b.dataset.srun;
+        const st = el.querySelector(`[data-sstatus="${name}"]`); st.textContent = "läuft…";
+        let args; try { args = parseJsonField(el.querySelector(`[data-sargs="${name}"]`)); }
+        catch { st.textContent = "Argumente sind kein gültiges JSON."; return; }
+        try { const r = await api("POST", "/api/admin/skills/run", { name, args });
+              st.textContent = r.ok ? ("Ergebnis: " + JSON.stringify(r.result)) : ("Fehler: " + r.error); }
+        catch (e) { st.textContent = "✗ " + (e.message || "Fehler"); }
+    });
+}
+$("btn-skills-refresh").onclick = loadSkills;
 
 async function loadConfig() {
     const cfg = await api("GET", "/api/config");
