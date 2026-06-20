@@ -434,6 +434,21 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "load_skills",
+            "description": "Lädt die GETIPPTEN Werkzeuge der genannten Skills, sodass du sie danach direkt als "
+                           "`skill__<name>` mit passenden Parametern aufrufen kannst (statt über run_skill). "
+                           "Nutze dies, wenn du ein Skill mehrfach/typsicher verwenden willst.",
+            "parameters": {
+                "type": "object",
+                "properties": {"names": {"type": "array", "items": {"type": "string"},
+                                         "description": "Namen der zu ladenden Skills."}},
+                "required": ["names"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_skills",
             "description": "Sucht in den vorhandenen Skills (nach Name/Beschreibung). Leere Suche listet alle.",
             "parameters": {"type": "object",
@@ -714,11 +729,26 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
         s = skills.get(args.get("name") or "")
         if not s or not s.get("enabled"):
             return f"Kein aktives Skill „{args.get('name')}“. Mit search_skills suchen oder create_skill bauen."
-        r = await asyncio.to_thread(skills.run_skill_code, s["code"], args.get("args") or {}, ns, s.get("net", False))
-        skills.record_run(s["name"], r["ok"], r.get("error"))
-        if not r["ok"]:
-            return f"Skill „{s['name']}“ Fehler: {r['error']}"
-        return f"Ergebnis von {s['name']}: {r['result']}"
+        return await _exec_skill(s, args.get("args") or {}, ns)
+
+    if name.startswith("skill__"):                       # getipptes Skill (per load_skills geladen)
+        s = skills.get(name[len("skill__"):])
+        if not s or not s.get("enabled"):
+            return f"Skill „{name}“ ist nicht verfügbar."
+        return await _exec_skill(s, args, ns)
+
+    if name == "load_skills":
+        loaded = ctx.setdefault("loaded_skills", set())
+        if not isinstance(loaded, set):
+            loaded = set(loaded); ctx["loaded_skills"] = loaded
+        found = []
+        for n in args.get("names") or []:
+            s = skills.get(n)
+            if s and s.get("enabled"):
+                loaded.add(s["name"]); found.append(s["name"])
+        if not found:
+            return "Keine passenden aktiven Skills gefunden."
+        return "Geladen — direkt aufrufbar: " + ", ".join(f"skill__{n}" for n in found)
 
     if name == "search_skills":
         found = skills.search(args.get("query") or "")
@@ -1268,6 +1298,16 @@ async def _create_watch_automation(args: dict, ctx: dict, sid: str) -> str:
     automations.manager.update(a["id"], state=baseline)
     return (f"Überwachung „{a['title']}“ eingerichtet — ich prüfe alle {mins} min günstig per Skript "
             "und melde mich erst, wenn sich wirklich etwas ändert.")
+
+
+async def _exec_skill(s: dict, sargs: dict, ns: str) -> str:
+    """Führt ein Skill aus, zählt Erfolg/Fehler und gibt bei Fehler einen Reparatur-Hinweis (Self-Heal-Nudge)."""
+    r = await asyncio.to_thread(skills.run_skill_code, s["code"], sargs or {}, ns, s.get("net", False))
+    skills.record_run(s["name"], r["ok"], r.get("error"))
+    if not r["ok"]:
+        return (f"Skill „{s['name']}“ Fehler: {r['error']}\n"
+                "Du kannst das Skill mit update_skill korrigieren (gib den verbesserten Code an).")
+    return f"Ergebnis von {s['name']}: {r['result']}"
 
 
 def _format_sandbox_result(res: dict) -> str:

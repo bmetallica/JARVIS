@@ -284,8 +284,9 @@ async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: l
     working = list(base_working)
     for _ in range(MAX_TOOL_STEPS):
         t0 = time.time()
+        tools_now = available_tools + skills.schemas_for(ctx.get("loaded_skills"))   # deferred: geladene Skills dazu
         try:
-            res = await asyncio.to_thread(services.llm_call, working, cfg, available_tools, think)
+            res = await asyncio.to_thread(services.llm_call, working, cfg, tools_now, think)
         except Exception as e:
             debug.log("llm_error", think=think, error=str(e)[:200])
             return {"ok": False, "content": "", "error": str(e)}
@@ -356,10 +357,11 @@ async def chat_stream(req: ChatRequest):
         working = list(base_working)
         for _ in range(MAX_TOOL_STEPS):
             q: asyncio.Queue = asyncio.Queue()
+            tools_now = available_tools + skills.schemas_for(ctx.get("loaded_skills"))   # deferred: geladene Skills
 
             def produce():
                 try:
-                    for ev in services.llm_stream(working, cfg, available_tools, use_think):
+                    for ev in services.llm_stream(working, cfg, tools_now, use_think):
                         loop.call_soon_threadsafe(q.put_nowait, ev)
                 except Exception as e:
                     loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "detail": str(e)})

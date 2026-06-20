@@ -17,8 +17,10 @@ SKILL_CONTRACT = (
     "Schreibe ein Python-Skill für die Sandbox (nur Standardbibliothek + `requests`).\n"
     "Definiere GENAU EINE Funktion `def run(args):`, die die Eingaben aus dem dict `args` liest und das "
     "Ergebnis per `return` zurückgibt (Zahl, Text, Liste oder dict — wird dem Aufrufer gemeldet).\n"
-    "Beispiel: `def run(args):\\n    return args['a'] + args['b']`\n"
+    "Die Werte in `args` können als String ankommen — wandle Zahlen IMMER sicher um (int()/float()).\n"
+    "Beispiel: `def run(args):\\n    return float(args['a']) + float(args['b'])`\n"
     "Die Funktion wird automatisch mit den Aufruf-Argumenten ausgeführt — schreibe selbst KEINEN Aufruf.\n"
+    "Bei `params` darfst du Typen angeben, z.B. {'a': {'type': 'number', 'description': '...'}}, sonst gilt Text.\n"
     "Robust halten: HTTP-Timeout, try/except, sinnvoller User-Agent. KEINE Endlosschleifen, kein input()."
 )
 
@@ -183,15 +185,45 @@ def record_run(name: str, ok: bool, error: str | None = None) -> None:
     _save()
 
 
+# ── Typisierte Tool-Schemas (deferred: on demand via load_skills) ─────────────
+def _param_schema(params: dict) -> dict:
+    """Lockere params ({name: "Beschreibung"} ODER {name: {type, description}}) → JSON-Schema."""
+    props = {}
+    for k, v in (params or {}).items():
+        if isinstance(v, dict):
+            props[k] = {"type": v.get("type", "string"), "description": str(v.get("description", ""))}
+        else:
+            props[k] = {"type": "string", "description": str(v)}
+    return {"type": "object", "properties": props}
+
+
+def tool_schema(s: dict) -> dict:
+    return {"type": "function", "function": {
+        "name": f"skill__{s['name']}",
+        "description": (s.get("description") or s["name"]) + " (selbst-gebautes Skill)",
+        "parameters": _param_schema(s.get("params")),
+    }}
+
+
+def schemas_for(names) -> list[dict]:
+    """Tool-Schemas für die per load_skills geladenen Skills (für den Tool-Loop)."""
+    out = []
+    for n in names or []:
+        s = _by_name(n)
+        if s and s.get("enabled"):
+            out.append(tool_schema(s))
+    return out
+
+
 # ── LLM-Anbindung (deferred: nur Namen+Beschreibung im Prompt) ────────────────
 def catalog_hint() -> str:
     items = all_enabled()
     if not items:
         return ""
     lines = "\n".join(f"- {s['name']}: {s['description']}" for s in items[:60])
-    return ("\n\nSELBST-GEBAUTE SKILLS (wiederverwendbare Werkzeuge): rufe `run_skill(name, args)` für ein "
-            "vorhandenes auf, `describe_skill(name)` für Details, `create_skill(...)` für ein neues. Verfügbar:\n"
-            + lines)
+    return ("\n\nSELBST-GEBAUTE SKILLS (wiederverwendbare Werkzeuge): rufe ein vorhandenes per `run_skill(name, args)` auf "
+            "(oder lade es mit `load_skills([name])`, dann steht es als getipptes Werkzeug `skill__<name>` bereit); "
+            "`describe_skill(name)` für Details, `create_skill(...)` für ein neues. Verfügbar:\n" + lines)
 
 
 _load()
