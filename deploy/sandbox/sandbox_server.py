@@ -77,6 +77,67 @@ def health():
     return {"ok": True, "service": "jarvis-sandbox"}
 
 
+# ── Abhängigkeiten (apt/pip) installieren — persistiert im Volume, Re-Install beim Start ──
+DEPS_MANIFEST = WORKSPACE_ROOT / ".deps.json"
+
+
+def _read_manifest() -> dict:
+    import json
+    try:
+        return json.loads(DEPS_MANIFEST.read_text())
+    except Exception:
+        return {"apt": [], "pip": []}
+
+
+def _install_pkgs(apt: list, pip: list) -> dict:
+    log, ok = [], True
+    is_root = (os.geteuid() == 0)
+    if pip:
+        cmd = ["pip", "install", "--no-cache-dir"] + ([] if is_root else ["--user"]) + list(pip)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        ok = ok and r.returncode == 0
+        log.append(f"pip {' '.join(pip)} → rc={r.returncode}\n" + (r.stderr or r.stdout)[-600:])
+    if apt:
+        if is_root:
+            subprocess.run(["apt-get", "update"], capture_output=True, text=True, timeout=300)
+            r = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", *apt],
+                               capture_output=True, text=True, timeout=900)
+            ok = ok and r.returncode == 0
+            log.append(f"apt {' '.join(apt)} → rc={r.returncode}\n" + (r.stderr or r.stdout)[-600:])
+        else:
+            ok = False
+            log.append(f"apt {' '.join(apt)} NICHT möglich (nicht root — nur in der privilegierten Spur).")
+    return {"ok": ok, "log": "\n".join(log) or "nichts zu tun"}
+
+
+class InstallReq(BaseModel):
+    apt: list[str] = []
+    pip: list[str] = []
+
+
+@app.post("/install")
+def install(req: InstallReq):
+    import json
+    m = _read_manifest()
+    m["apt"] = sorted(set(m.get("apt", []) + (req.apt or [])))
+    m["pip"] = sorted(set(m.get("pip", []) + (req.pip or [])))
+    try:
+        DEPS_MANIFEST.write_text(json.dumps(m))
+    except Exception:
+        pass
+    return _install_pkgs(req.apt or [], req.pip or [])
+
+
+@app.on_event("startup")
+def _reinstall_on_boot():
+    m = _read_manifest()
+    if m.get("apt") or m.get("pip"):
+        try:
+            _install_pkgs(m.get("apt", []), m.get("pip", []))
+        except Exception as e:
+            print(f"[sandbox] Re-Install beim Start fehlgeschlagen: {e}")
+
+
 @app.post("/exec")
 def execute(req: ExecReq):
     work = _ns_dir(req.namespace)

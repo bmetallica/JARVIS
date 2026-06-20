@@ -27,6 +27,22 @@ def available() -> bool:
         return False
 
 
+def install(apt: list | None = None, pip: list | None = None, privileged: bool = False) -> dict:
+    """Pakete im Sandbox-Container installieren (apt nur in der privilegierten Spur als root).
+    Persistiert im Volume → wird beim Container-Start neu installiert."""
+    apt, pip = apt or [], pip or []
+    if not apt and not pip:
+        return {"ok": True, "log": "keine Pakete"}
+    try:
+        r = requests.post(_base(privileged) + "/install", json={"apt": apt, "pip": pip}, timeout=960)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        return {"ok": False, "log": "Sandbox-Container nicht erreichbar."}
+    except Exception as e:
+        return {"ok": False, "log": f"Install-Fehler: {e}"}
+
+
 def execute(code: str, language: str = "python", namespace: str = "default",
             allow_network: bool | None = None, privileged: bool = False) -> dict:
     cfg = config.get()

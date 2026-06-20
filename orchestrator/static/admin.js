@@ -352,7 +352,9 @@ async function loadSkills() {
             <button class="small secondary" data-stog="${s.name}">${s.enabled ? "Deaktivieren" : "Aktivieren"}</button>
             <button class="small secondary" data-ssave="${s.name}">💾 Code speichern</button>
             <button class="small danger" data-sdel="${s.name}">Löschen</button></span></div>
-            <div class="muted" style="font-size:12px">${escHtml(s.description)} · v${s.version} · Läufe: ${s.run_count}${fail}</div>
+            <div class="muted" style="font-size:12px">${escHtml(s.description)} · v${s.version} · Läufe: ${s.run_count}${fail}${
+              ((s.apt && s.apt.length) || (s.pip && s.pip.length))
+                ? " · Pakete: " + [...(s.apt || []).map((x) => "apt:" + x), ...(s.pip || []).map((x) => "pip:" + x)].join(", ") : ""}</div>
             <textarea data-scode="${s.name}" rows="6" style="width:100%;font-family:monospace;font-size:11px;margin-top:6px">${escHtml(s.code)}</textarea>
             <div class="row" style="margin-top:4px;align-items:center">
               <label class="inline" style="font-size:11px"><input type="checkbox" data-snet="${s.name}" ${s.net ? "checked" : ""}> Netz erlaubt</label>
@@ -399,8 +401,11 @@ async function loadSkills() {
     el.querySelectorAll("[data-strust]").forEach((b) => b.onchange = async () => {
         if (b.value === "elevated" && !confirm("Erhöhte Rechte: dieses Skill läuft dann mit Hostnetz + NET_RAW. "
             + "Prüfe den Code! Wirklich freischalten?")) { b.value = "sandbox"; return; }
-        try { await api("POST", "/api/admin/skills/update", { name: b.dataset.strust, trust: b.value }); await loadSkills(); }
-        catch (e) { alert(e.message || "Fehler"); }
+        try {
+            const r = await api("POST", "/api/admin/skills/update", { name: b.dataset.strust, trust: b.value });
+            if (r && r.install_log) alert((r.install_ok ? "Pakete installiert:\n\n" : "Paket-Installation mit Problemen:\n\n") + r.install_log);
+            await loadSkills();
+        } catch (e) { alert(e.message || "Fehler"); }
     });
     el.querySelectorAll("[data-sauto]").forEach((b) => b.onchange = async () => {
         try { await api("POST", "/api/admin/skills/update", { name: b.dataset.sauto, autonomous_ok: b.checked }); }

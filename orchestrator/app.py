@@ -36,6 +36,7 @@ import debug
 import automations
 import watchers
 import skills
+import sandbox
 import messaging
 from session_hub import hub
 
@@ -1175,8 +1176,13 @@ async def admin_skill_update(body: dict, jarvis_admin_token: str | None = Cookie
                                        "skills", bool(b.get("net", s.get("net"))))
         if not test["ok"]:
             raise HTTPException(status_code=400, detail="Code-Test fehlgeschlagen: " + test["error"])
-    fields = {k: b[k] for k in ("description", "code", "net", "enabled", "trust", "autonomous_ok") if k in b}
-    return skills.update(s["name"], **fields)
+    fields = {k: b[k] for k in ("description", "code", "net", "enabled", "trust", "autonomous_ok", "apt", "pip") if k in b}
+    updated = skills.update(s["name"], **fields)
+    # Beim Freischalten auf „Erhöht" die benötigten Pakete in der privilegierten Spur installieren.
+    if updated and updated.get("trust") == "elevated" and (updated.get("apt") or updated.get("pip")):
+        res = await asyncio.to_thread(sandbox.install, updated.get("apt"), updated.get("pip"), True)
+        return {**updated, "install_ok": res.get("ok"), "install_log": res.get("log")}
+    return updated
 
 
 @app.post("/api/admin/skills/delete")

@@ -411,6 +411,11 @@ TOOL_SCHEMAS = [
                     "params": {"type": "object", "description": "Beschreibung der Argumente, z.B. {\"stadt\": \"Stadtname\"}."},
                     "test_args": {"type": "object", "description": "Beispiel-Argumente zum Testlauf vor dem Speichern."},
                     "net": {"type": "boolean", "description": "true, wenn das Skill ins Internet darf (Standard false)."},
+                    "pip": {"type": "array", "items": {"type": "string"},
+                            "description": "Benötigte Python-Pakete (werden installiert)."},
+                    "apt": {"type": "array", "items": {"type": "string"},
+                            "description": "Benötigte System-Pakete wie 'nmap'. Nur in der erhöhten Spur installierbar; "
+                                           "ein solches Skill braucht später Admin-Freigabe auf die Stufe Erhöht."},
                 },
                 "required": ["name", "description", "code"],
             },
@@ -478,6 +483,8 @@ TOOL_SCHEMAS = [
                     "test_args": {"type": "object", "description": "Beispiel-Argumente zum Testen geänderten Codes."},
                     "net": {"type": "boolean"},
                     "enabled": {"type": "boolean"},
+                    "pip": {"type": "array", "items": {"type": "string"}, "description": "Python-Pakete."},
+                    "apt": {"type": "array", "items": {"type": "string"}, "description": "System-Pakete (erhöhte Spur)."},
                 },
                 "required": ["name"],
             },
@@ -716,14 +723,31 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
         code = (args.get("code") or "").strip()
         if not sname or not code:
             return "Mir fehlen Name oder Code für das Skill."
-        test = await asyncio.to_thread(skills.run_skill_code, code, args.get("test_args") or {}, ns, bool(args.get("net")))
-        if not test["ok"]:
-            return ("Das Skill läuft noch nicht sauber — korrigiere den Code und rufe create_skill erneut auf:\n"
-                    + test["error"])
+        apt, pip = args.get("apt") or [], args.get("pip") or []
+        if pip:                                               # Python-Pakete sofort installieren (Sandbox-Spur)
+            await asyncio.to_thread(sandbox.install, [], pip, False)
+        if args.get("test_args") is not None:                 # mit Beispiel-Args → echter Funktionstest
+            test = await asyncio.to_thread(skills.run_skill_code, code, args["test_args"], ns, bool(args.get("net")))
+            if not test["ok"] and not (apt or pip):
+                return ("Das Skill läuft noch nicht sauber — korrigiere den Code und rufe create_skill erneut auf:\n"
+                        + test["error"])
+        else:                                                 # ohne Args → nur Syntax prüfen
+            ok, err = skills.syntax_ok(code)
+            if not ok:
+                return "Der Code ist nicht gültig: " + err
+            test = {"ok": True, "result": "(nur Syntax geprüft — ohne test_args kein Funktionslauf)"}
         s = skills.create(sname, args.get("description") or "", code, params=args.get("params") or {},
-                          owner_user_id=ctx.get("user_id"), net=bool(args.get("net")))
-        return (f"Skill „{s['name']}“ (v{s['version']}) angelegt und getestet. "
-                f"Aufruf künftig via run_skill name=\"{s['name']}\". Testergebnis: {test['result']}")
+                          owner_user_id=ctx.get("user_id"), net=bool(args.get("net")), apt=apt, pip=pip)
+        extra = ""
+        if pip:
+            extra += f" Python-Pakete installiert: {', '.join(pip)}."
+        if apt:
+            extra += (f" System-Pakete ({', '.join(apt)}) brauchen die erhöhte Spur — bitte im Admin-UI auf die Stufe "
+                      "Erhöht freischalten, dann installiere ich sie automatisch.")
+            if not test.get("ok"):
+                extra += " (Voller Test folgt nach der Freischaltung.)"
+        return (f"Skill „{s['name']}“ (v{s['version']}) angelegt. Aufruf via run_skill name=\"{s['name']}\".{extra} "
+                f"Testergebnis: {test.get('result') or test.get('error')}")
 
     if name == "run_skill":
         s = skills.get(args.get("name") or "")
@@ -767,12 +791,18 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
         s = skills.get(args.get("name") or "")
         if not s:
             return "Unbekanntes Skill."
+        has_deps = bool(args.get("apt") or args.get("pip") or s.get("apt") or s.get("pip"))
         if args.get("code"):
-            test = await asyncio.to_thread(skills.run_skill_code, args["code"], args.get("test_args") or {},
-                                           ns, bool(args.get("net", s.get("net"))))
-            if not test["ok"]:
-                return "Der geänderte Code läuft nicht sauber:\n" + test["error"]
-        fields = {k: args[k] for k in ("description", "code", "params", "net", "enabled") if k in args}
+            if args.get("test_args") is not None:             # mit Beispiel-Args → echter Funktionstest
+                test = await asyncio.to_thread(skills.run_skill_code, args["code"], args["test_args"],
+                                               ns, bool(args.get("net", s.get("net"))))
+                if not test["ok"] and not has_deps:
+                    return "Der geänderte Code läuft nicht sauber:\n" + test["error"]
+            else:                                             # ohne Args → nur Syntax prüfen
+                ok, err = skills.syntax_ok(args["code"])
+                if not ok:
+                    return "Der geänderte Code ist nicht gültig: " + err
+        fields = {k: args[k] for k in ("description", "code", "params", "net", "enabled", "apt", "pip") if k in args}
         if "code" in fields:                              # geänderter Code → erhöhte Rechte zurücksetzen (Re-Review)
             fields["trust"] = "sandbox"; fields["autonomous_ok"] = False
         skills.update(s["name"], **fields)

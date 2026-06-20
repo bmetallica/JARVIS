@@ -21,6 +21,9 @@ SKILL_CONTRACT = (
     "Beispiel: `def run(args):\\n    return float(args['a']) + float(args['b'])`\n"
     "Die Funktion wird automatisch mit den Aufruf-Argumenten ausgeführt — schreibe selbst KEINEN Aufruf.\n"
     "Bei `params` darfst du Typen angeben, z.B. {'a': {'type': 'number', 'description': '...'}}, sonst gilt Text.\n"
+    "WICHTIG — ABHÄNGIGKEITEN: Nutzt dein Code etwas außerhalb der Standardbibliothek, MUSST du es angeben, "
+    "damit es installiert wird: `pip` = Python-Pakete (z.B. ['paramiko','dnspython']), `apt` = System-Programme "
+    "(z.B. ['nmap','arp-scan']). Lass dir nichts vorinstalliert sein — deklariere ALLES, was du importierst/aufrufst.\n"
     "Robust halten: HTTP-Timeout, try/except, sinnvoller User-Agent. KEINE Endlosschleifen, kein input()."
 )
 
@@ -39,6 +42,8 @@ def _load() -> None:
             s.setdefault("trust", "sandbox")
             s.setdefault("autonomous_ok", False)
             s.setdefault("net", False)
+            s.setdefault("apt", [])
+            s.setdefault("pip", [])
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -70,6 +75,8 @@ def _by_name(name: str) -> dict | None:
 def _wrap(code: str, args: dict) -> str:
     """Skill-Code einbetten: `args` bereitstellen, danach `run(args)` aufrufen und Ergebnis ausgeben."""
     tmpl = (
+        "import site as _site, sys as _sys\n"                 # pip --user-Pakete importierbar machen (auch unter -I)
+        "_sys.path.append(_site.getusersitepackages())\n"
         "import json as _json\n"
         "args = _json.loads(__ARGS__)\n"
         "__CODE__\n"
@@ -97,6 +104,17 @@ def _parse(stdout: str):
     return None
 
 
+def syntax_ok(code: str) -> tuple[bool, str]:
+    """Leichter Check ohne Ausführung: Syntax gültig + Funktion run(args) vorhanden."""
+    try:
+        compile(code or "", "<skill>", "exec")
+    except SyntaxError as e:
+        return False, f"Syntaxfehler: {e}"
+    if "def run" not in (code or ""):
+        return False, "Der Code muss eine Funktion `def run(args):` definieren."
+    return True, ""
+
+
 def run_skill_code(code: str, args: dict, namespace: str, net: bool, trust: str = "sandbox") -> dict:
     """Skill-Code einmal ausführen. trust='elevated' → privilegierte Spur (Hostnetz+NET_RAW).
     Rückgabe {"ok": True, "result": …} oder {"ok": False, "error": …}."""
@@ -118,7 +136,8 @@ def run_skill_code(code: str, args: dict, namespace: str, net: bool, trust: str 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 def create(name: str, description: str, code: str, params: dict | None = None,
-           owner_user_id: int | None = None, net: bool = False) -> dict:
+           owner_user_id: int | None = None, net: bool = False,
+           apt: list | None = None, pip: list | None = None) -> dict:
     global _seq
     sn = sanitize_name(name)
     ex = _by_name(sn)                                    # gleicher Name → neue Version (ersetzen)
@@ -126,6 +145,7 @@ def create(name: str, description: str, code: str, params: dict | None = None,
         # Neuer Code vom LLM → erhöhte Rechte zurücksetzen (Admin muss neu prüfen/freigeben).
         ex.update({"description": (description or "").strip(), "code": code or "",
                    "params": params or {}, "net": bool(net), "enabled": True,
+                   "apt": list(apt or []), "pip": list(pip or []),
                    "version": ex.get("version", 1) + 1, "trust": "sandbox", "autonomous_ok": False})
         _save()
         return ex
@@ -136,6 +156,8 @@ def create(name: str, description: str, code: str, params: dict | None = None,
         "net": bool(net), "enabled": True, "version": 1,
         "trust": "sandbox",            # "sandbox" (isoliert) | "elevated" (Hostnetz+NET_RAW) — NUR Admin
         "autonomous_ok": False,        # erhöhte Skills dürfen nur autonom laufen, wenn Admin das extra erlaubt
+        "apt": list(apt or []),        # benötigte System-Pakete (nur in erhöhter Spur installierbar)
+        "pip": list(pip or []),        # benötigte Python-Pakete
         "run_count": 0, "fail_count": 0, "last_error": None, "created_at": time.time(),
     }
     _items[s["id"]] = s
@@ -147,7 +169,7 @@ def update(name: str, **fields) -> dict | None:
     s = _by_name(name)
     if not s:
         return None
-    for k in ("description", "code", "params", "net", "enabled", "trust", "autonomous_ok"):
+    for k in ("description", "code", "params", "net", "enabled", "trust", "autonomous_ok", "apt", "pip"):
         if k in fields and fields[k] is not None:
             s[k] = fields[k]
     s["version"] = s.get("version", 1) + 1
@@ -230,9 +252,10 @@ def catalog_hint() -> str:
     if not items:
         return ""
     lines = "\n".join(f"- {s['name']}: {s['description']}" for s in items[:60])
-    return ("\n\nSELBST-GEBAUTE SKILLS (wiederverwendbare Werkzeuge): rufe ein vorhandenes per `run_skill(name, args)` auf "
-            "(oder lade es mit `load_skills([name])`, dann steht es als getipptes Werkzeug `skill__<name>` bereit); "
-            "`describe_skill(name)` für Details, `create_skill(...)` für ein neues. Verfügbar:\n" + lines)
+    return ("\n\nSELBST-GEBAUTE SKILLS (wiederverwendbare Werkzeuge): `run_skill(name, args)` ausführen "
+            "(oder `load_skills([name])` → getipptes `skill__<name>`); `describe_skill(name)` für Details/Code; "
+            "`create_skill(...)` neu; **`update_skill(name, code=…)` zum Ändern eines bestehenden Skills** (du darfst "
+            "deine eigenen Skills jederzeit bearbeiten); `delete_skill(name)` löschen. Verfügbar:\n" + lines)
 
 
 _load()

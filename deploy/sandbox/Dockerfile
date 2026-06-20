@@ -3,7 +3,8 @@
 # getrennt vom Host. Basis = offizielles Playwright-Image (Chromium + Systemdeps vorinstalliert).
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
-# util-linux liefert `unshare` (Netz-Isolation pro Job, wenn Internet deaktiviert ist)
+# util-linux liefert `unshare` (Netz-Isolation pro Job). Weitere Pakete bringt jedes Skill
+# selbst per `apt`/`pip`-Deklaration mit → werden automatisch installiert (kein Vorbacken).
 RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
     && rm -rf /var/lib/apt/lists/*
 
