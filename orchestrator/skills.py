@@ -35,6 +35,10 @@ def _load() -> None:
         d = json.loads(_PATH.read_text(encoding="utf-8"))
         _items = {s["id"]: s for s in d.get("items", [])}
         _seq = d.get("seq", 0)
+        for s in _items.values():                        # Altbestand um neue Felder ergänzen
+            s.setdefault("trust", "sandbox")
+            s.setdefault("autonomous_ok", False)
+            s.setdefault("net", False)
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -93,9 +97,11 @@ def _parse(stdout: str):
     return None
 
 
-def run_skill_code(code: str, args: dict, namespace: str, net: bool) -> dict:
-    """Skill-Code einmal ausführen. Rückgabe {"ok": True, "result": …} oder {"ok": False, "error": …}."""
-    res = sandbox.execute(_wrap(code, args), "python", namespace, allow_network=bool(net))
+def run_skill_code(code: str, args: dict, namespace: str, net: bool, trust: str = "sandbox") -> dict:
+    """Skill-Code einmal ausführen. trust='elevated' → privilegierte Spur (Hostnetz+NET_RAW).
+    Rückgabe {"ok": True, "result": …} oder {"ok": False, "error": …}."""
+    priv = (trust == "elevated")
+    res = sandbox.execute(_wrap(code, args), "python", namespace, allow_network=bool(net), privileged=priv)
     if res.get("disabled"):
         return {"ok": False, "error": "Code-Sandbox ist deaktiviert (Admin)."}
     if res.get("offline"):
@@ -117,9 +123,10 @@ def create(name: str, description: str, code: str, params: dict | None = None,
     sn = sanitize_name(name)
     ex = _by_name(sn)                                    # gleicher Name → neue Version (ersetzen)
     if ex:
+        # Neuer Code vom LLM → erhöhte Rechte zurücksetzen (Admin muss neu prüfen/freigeben).
         ex.update({"description": (description or "").strip(), "code": code or "",
                    "params": params or {}, "net": bool(net), "enabled": True,
-                   "version": ex.get("version", 1) + 1})
+                   "version": ex.get("version", 1) + 1, "trust": "sandbox", "autonomous_ok": False})
         _save()
         return ex
     _seq += 1
@@ -127,6 +134,8 @@ def create(name: str, description: str, code: str, params: dict | None = None,
         "id": f"s{_seq}", "name": sn, "description": (description or "").strip(),
         "params": params or {}, "code": code or "", "owner_user_id": owner_user_id,
         "net": bool(net), "enabled": True, "version": 1,
+        "trust": "sandbox",            # "sandbox" (isoliert) | "elevated" (Hostnetz+NET_RAW) — NUR Admin
+        "autonomous_ok": False,        # erhöhte Skills dürfen nur autonom laufen, wenn Admin das extra erlaubt
         "run_count": 0, "fail_count": 0, "last_error": None, "created_at": time.time(),
     }
     _items[s["id"]] = s
@@ -138,7 +147,7 @@ def update(name: str, **fields) -> dict | None:
     s = _by_name(name)
     if not s:
         return None
-    for k in ("description", "code", "params", "net", "enabled"):
+    for k in ("description", "code", "params", "net", "enabled", "trust", "autonomous_ok"):
         if k in fields and fields[k] is not None:
             s[k] = fields[k]
     s["version"] = s.get("version", 1) + 1

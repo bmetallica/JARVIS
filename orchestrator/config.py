@@ -43,6 +43,7 @@ _DEFAULTS: dict = {
 
     # ── Code-Sandbox (Tier 3, eigener Container — niemals auf dem Host) ───────────
     "sandbox_url": "http://127.0.0.1:8090",
+    "sandbox_priv_url": "http://127.0.0.1:8091",  # privilegierte Spur (Hostnetz+NET_RAW) für „erhöhte" Skills
     "sandbox_enabled": True,                    # Code-Ausführung global an/aus
     "sandbox_allow_network": True,              # Internet im Sandbox-Code (sonst unshare -rn)
     "sandbox_timeout_s": 30,                    # Job-Timeout (Sekunden)

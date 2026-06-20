@@ -27,5 +27,27 @@ services:
     # Netzwerk bleibt an (Internet im Code möglich); pro Job über `unshare -rn`
     # abschaltbar, gesteuert vom Orchestrator (Admin-Toggle sandbox_allow_network).
 
+  # ── Privilegierte Spur (OPT-IN) — nur für vom Admin freigeschaltete „erhöhte" Skills ──
+  # Hostnetz (im LAN) + NET_RAW (ARP/Ping-Scan), läuft als root. Server bindet NUR auf
+  # 127.0.0.1:8091 → trotz Hostnetz NICHT im LAN erreichbar, nur vom Orchestrator.
+  # Erst starten, wenn erhöhte Skills gebraucht werden:  docker compose up -d --build sandbox-priv
+  sandbox-priv:
+    build: .
+    container_name: jarvis-sandbox-priv
+    network_mode: host
+    user: root
+    command: ["uvicorn", "sandbox_server:app", "--host", "127.0.0.1", "--port", "8091", "--app-dir", "/app"]
+    volumes:
+      - sandbox_workspace:/workspace
+    restart: unless-stopped
+    mem_limit: 1g
+    pids_limit: 256
+    cpus: 2.0
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+
 volumes:
   sandbox_workspace:

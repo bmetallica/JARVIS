@@ -1175,7 +1175,7 @@ async def admin_skill_update(body: dict, jarvis_admin_token: str | None = Cookie
                                        "skills", bool(b.get("net", s.get("net"))))
         if not test["ok"]:
             raise HTTPException(status_code=400, detail="Code-Test fehlgeschlagen: " + test["error"])
-    fields = {k: b[k] for k in ("description", "code", "net", "enabled") if k in b}
+    fields = {k: b[k] for k in ("description", "code", "net", "enabled", "trust", "autonomous_ok") if k in b}
     return skills.update(s["name"], **fields)
 
 
@@ -1193,7 +1193,7 @@ async def admin_skill_run(body: dict, jarvis_admin_token: str | None = Cookie(de
     if not s:
         raise HTTPException(status_code=404, detail="Unbekanntes Skill.")
     return await asyncio.to_thread(skills.run_skill_code, s["code"], b.get("args") or {},
-                                   "skills", s.get("net", False))
+                                   "skills", s.get("net", False), s.get("trust", "sandbox"))
 
 
 @app.get("/api/admin/autonomy")

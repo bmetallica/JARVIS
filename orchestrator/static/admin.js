@@ -342,19 +342,32 @@ async function loadSkills() {
         const on = s.enabled ? '<span class="tag" style="background:var(--ok);color:#04141b">aktiv</span>'
                              : '<span class="tag" style="background:#33404d;color:#9fb3c8">aus</span>';
         const net = s.net ? '<span class="tag" style="background:#2a3f5f;color:#9fc3ff">🌐 Netz</span>' : "";
+        const trust = s.trust === "elevated"
+            ? '<span class="tag" style="background:#5a2a2a;color:#ffb3b3">⚡ Erhöht</span>'
+            : '<span class="tag" style="background:#33404d;color:#9fb3c8">🔒 Sandbox</span>';
         const fail = s.fail_count ? ` · <span style="color:var(--bad)">Fehler: ${s.fail_count}</span>` : "";
-        div.innerHTML = `<div class="head"><span class="name">${s.name} ${on} ${net}</span>
+        const elev = s.trust === "elevated";
+        div.innerHTML = `<div class="head"><span class="name">${s.name} ${on} ${net} ${trust}</span>
             <span><button class="small" data-srun="${s.name}">▶ Test</button>
             <button class="small secondary" data-stog="${s.name}">${s.enabled ? "Deaktivieren" : "Aktivieren"}</button>
             <button class="small secondary" data-ssave="${s.name}">💾 Code speichern</button>
             <button class="small danger" data-sdel="${s.name}">Löschen</button></span></div>
             <div class="muted" style="font-size:12px">${escHtml(s.description)} · v${s.version} · Läufe: ${s.run_count}${fail}</div>
             <textarea data-scode="${s.name}" rows="6" style="width:100%;font-family:monospace;font-size:11px;margin-top:6px">${escHtml(s.code)}</textarea>
-            <div class="row" style="margin-top:4px">
+            <div class="row" style="margin-top:4px;align-items:center">
               <label class="inline" style="font-size:11px"><input type="checkbox" data-snet="${s.name}" ${s.net ? "checked" : ""}> Netz erlaubt</label>
+              <label class="inline" style="font-size:11px">Rechte:
+                <select data-strust="${s.name}">
+                  <option value="sandbox" ${!elev ? "selected" : ""}>🔒 Sandbox</option>
+                  <option value="elevated" ${elev ? "selected" : ""}>⚡ Erhöht (Hostnetz+Raw)</option>
+                </select></label>
+              <label class="inline" style="font-size:11px" title="Erhöhte Skills laufen sonst nur interaktiv">
+                <input type="checkbox" data-sauto="${s.name}" ${s.autonomous_ok ? "checked" : ""}> autonom erlaubt</label>
+            </div>
+            <div class="row" style="margin-top:4px">
               <input data-sargs="${s.name}" placeholder='Argumente JSON, z.B. {"a":1,"b":2}' style="flex:1;font-size:11px">
             </div>
-            <div class="muted" data-sstatus="${s.name}" style="font-size:11px;margin-top:3px"></div>`;
+            <div class="muted" data-sstatus="${s.name}" style="font-size:11px;margin-top:3px">${elev ? "⚡ Erhöht: läuft im privilegierten Container (sandbox-priv) mit Hostnetz + NET_RAW." : ""}</div>`;
         el.appendChild(div);
     }
     el.querySelectorAll("[data-stog]").forEach((b) => b.onclick = async () => {
@@ -382,6 +395,16 @@ async function loadSkills() {
         try { const r = await api("POST", "/api/admin/skills/run", { name, args });
               st.textContent = r.ok ? ("Ergebnis: " + JSON.stringify(r.result)) : ("Fehler: " + r.error); }
         catch (e) { st.textContent = "✗ " + (e.message || "Fehler"); }
+    });
+    el.querySelectorAll("[data-strust]").forEach((b) => b.onchange = async () => {
+        if (b.value === "elevated" && !confirm("Erhöhte Rechte: dieses Skill läuft dann mit Hostnetz + NET_RAW. "
+            + "Prüfe den Code! Wirklich freischalten?")) { b.value = "sandbox"; return; }
+        try { await api("POST", "/api/admin/skills/update", { name: b.dataset.strust, trust: b.value }); await loadSkills(); }
+        catch (e) { alert(e.message || "Fehler"); }
+    });
+    el.querySelectorAll("[data-sauto]").forEach((b) => b.onchange = async () => {
+        try { await api("POST", "/api/admin/skills/update", { name: b.dataset.sauto, autonomous_ok: b.checked }); }
+        catch (e) { alert(e.message || "Fehler"); }
     });
 }
 $("btn-skills-refresh").onclick = loadSkills;

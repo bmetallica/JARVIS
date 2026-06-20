@@ -12,8 +12,11 @@ import requests
 import config
 
 
-def _base() -> str:
-    return config.get().get("sandbox_url", "http://127.0.0.1:8090").rstrip("/")
+def _base(privileged: bool = False) -> str:
+    cfg = config.get()
+    if privileged:
+        return cfg.get("sandbox_priv_url", "http://127.0.0.1:8091").rstrip("/")
+    return cfg.get("sandbox_url", "http://127.0.0.1:8090").rstrip("/")
 
 
 def available() -> bool:
@@ -25,12 +28,13 @@ def available() -> bool:
 
 
 def execute(code: str, language: str = "python", namespace: str = "default",
-            allow_network: bool | None = None) -> dict:
+            allow_network: bool | None = None, privileged: bool = False) -> dict:
     cfg = config.get()
     if not cfg.get("sandbox_enabled", True):
         return {"ok": False, "stderr": "Code-Ausführung ist deaktiviert (Admin).", "disabled": True}
     # allow_network: None = globaler Admin-Toggle; True/False = expliziter Override (z.B. Watcher-Skripte).
-    net = bool(cfg.get("sandbox_allow_network", True)) if allow_network is None else bool(allow_network)
+    # privileged=True → privilegierte Spur (Hostnetz+NET_RAW), die immer Netz hat.
+    net = True if privileged else (bool(cfg.get("sandbox_allow_network", True)) if allow_network is None else bool(allow_network))
     payload = {
         "language": language,
         "code": code,
@@ -39,13 +43,15 @@ def execute(code: str, language: str = "python", namespace: str = "default",
         "allow_network": net,
     }
     try:
-        r = requests.post(_base() + "/exec", json=payload,
+        r = requests.post(_base(privileged) + "/exec", json=payload,
                           timeout=int(cfg.get("sandbox_timeout_s", 30)) + 15)
         r.raise_for_status()
         return r.json()
     except requests.exceptions.ConnectionError:
-        return {"ok": False, "stderr": "Sandbox-Container nicht erreichbar (läuft `deploy/sandbox`?).",
-                "offline": True}
+        msg = ("Privilegierte Sandbox (sandbox-priv) nicht erreichbar — Container starten: "
+               "`cd deploy/sandbox && docker compose up -d --build sandbox-priv`.") if privileged \
+              else "Sandbox-Container nicht erreichbar (läuft `deploy/sandbox`?)."
+        return {"ok": False, "stderr": msg, "offline": True}
     except Exception as e:
         return {"ok": False, "stderr": f"Sandbox-Fehler: {e}"}
 

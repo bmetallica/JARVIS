@@ -729,13 +729,13 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
         s = skills.get(args.get("name") or "")
         if not s or not s.get("enabled"):
             return f"Kein aktives Skill „{args.get('name')}“. Mit search_skills suchen oder create_skill bauen."
-        return await _exec_skill(s, args.get("args") or {}, ns)
+        return await _exec_skill(s, args.get("args") or {}, ns, ctx)
 
     if name.startswith("skill__"):                       # getipptes Skill (per load_skills geladen)
         s = skills.get(name[len("skill__"):])
         if not s or not s.get("enabled"):
             return f"Skill „{name}“ ist nicht verfügbar."
-        return await _exec_skill(s, args, ns)
+        return await _exec_skill(s, args, ns, ctx)
 
     if name == "load_skills":
         loaded = ctx.setdefault("loaded_skills", set())
@@ -773,6 +773,8 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
             if not test["ok"]:
                 return "Der geänderte Code läuft nicht sauber:\n" + test["error"]
         fields = {k: args[k] for k in ("description", "code", "params", "net", "enabled") if k in args}
+        if "code" in fields:                              # geänderter Code → erhöhte Rechte zurücksetzen (Re-Review)
+            fields["trust"] = "sandbox"; fields["autonomous_ok"] = False
         skills.update(s["name"], **fields)
         return f"Skill „{s['name']}“ aktualisiert."
 
@@ -1300,9 +1302,14 @@ async def _create_watch_automation(args: dict, ctx: dict, sid: str) -> str:
             "und melde mich erst, wenn sich wirklich etwas ändert.")
 
 
-async def _exec_skill(s: dict, sargs: dict, ns: str) -> str:
+async def _exec_skill(s: dict, sargs: dict, ns: str, ctx: dict) -> str:
     """Führt ein Skill aus, zählt Erfolg/Fehler und gibt bei Fehler einen Reparatur-Hinweis (Self-Heal-Nudge)."""
-    r = await asyncio.to_thread(skills.run_skill_code, s["code"], sargs or {}, ns, s.get("net", False))
+    trust = s.get("trust", "sandbox")
+    # Erhöhte Skills (Hostnetz/Raw) NIE autonom, außer der Admin hat es für genau dieses Skill erlaubt.
+    if trust == "elevated" and ctx.get("autonomous") and not s.get("autonomous_ok"):
+        return (f"Skill „{s['name']}“ hat erhöhte Rechte und darf NICHT autonom laufen — nur in einem "
+                "interaktiven Gespräch.")
+    r = await asyncio.to_thread(skills.run_skill_code, s["code"], sargs or {}, ns, s.get("net", False), trust)
     skills.record_run(s["name"], r["ok"], r.get("error"))
     if not r["ok"]:
         return (f"Skill „{s['name']}“ Fehler: {r['error']}\n"
