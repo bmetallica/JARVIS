@@ -36,6 +36,14 @@ function connectWS() {
             const pre = msg.automation ? `🤖 ${msg.automation}: ` : "🔔 ";
             addMsg("system", pre + msg.message);
             enqueueTTS(msg.message);           // proaktive Meldung (Automatisierung/Ereignis)
+        } else if (msg.type === "attachment" && msg.data_uri) {
+            const div = addMsg("assistant", msg.caption || "");   // Bild aus dem Workspace anzeigen
+            const img = document.createElement("img");
+            img.src = msg.data_uri;
+            img.alt = msg.name || "Bild";
+            img.style.cssText = "max-width:100%;border-radius:8px;margin-top:6px;display:block";
+            div.appendChild(img);
+            chatEl.scrollTop = chatEl.scrollHeight;
         }
     };
     ws.onclose = () => setTimeout(connectWS, 2000);   // Reconnect

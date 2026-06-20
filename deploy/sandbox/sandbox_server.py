@@ -232,6 +232,20 @@ def read_file(namespace: str = "default", path: str = ""):
             "bytes": target.stat().st_size}
 
 
+@app.get("/file_b64")
+def read_file_b64(namespace: str = "default", path: str = ""):
+    """Datei BINÄR (Base64) zurückgeben — für Bilder/PDFs etc. (max. 12 MB)."""
+    import base64
+    target = _safe_path(namespace, path)
+    if not target or not target.is_file():
+        return {"ok": False, "error": "Datei nicht gefunden."}
+    data = target.read_bytes()
+    if len(data) > 12 * 1024 * 1024:
+        return {"ok": False, "error": "Datei zu groß (>12 MB)."}
+    return {"ok": True, "name": target.name, "bytes": len(data),
+            "b64": base64.b64encode(data).decode()}
+
+
 class WriteReq(BaseModel):
     namespace: str = "default"
     path: str

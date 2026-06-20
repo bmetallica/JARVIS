@@ -96,6 +96,27 @@ def send_to_user(user_id, text: str) -> bool:
     return send_to_chat(chat_for_user(user_id), text)
 
 
+def send_photo_to_chat(chat_id, img_bytes: bytes, caption: str = "", filename: str = "bild.png") -> bool:
+    """Bild senden — gleicher Verifizierungs-Chokepoint wie Text (nur an verifizierte Chats)."""
+    if not enabled() or not chat_id or not img_bytes:
+        return False
+    if not is_verified(chat_id):
+        print(f"[messaging] BLOCKIERT: Foto an nicht verifizierte Chat-ID {chat_id} abgelehnt.")
+        return False
+    try:
+        data = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption[:1000]
+        r = requests.post(_api("sendPhoto"), data=data, files={"photo": (filename, img_bytes)}, timeout=30)
+        return r.ok
+    except Exception:
+        return False
+
+
+def send_photo_to_user(user_id, img_bytes: bytes, caption: str = "", filename: str = "bild.png") -> bool:
+    return send_photo_to_chat(chat_for_user(user_id), img_bytes, caption, filename)
+
+
 def user_for_chat(chat_id) -> dict | None:
     """Welcher JARVIS-Nutzer gehört zu diesem Telegram-Chat? (für eingehende Nachrichten)"""
     try:

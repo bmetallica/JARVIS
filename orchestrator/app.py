@@ -307,6 +307,7 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
     """Voller Chat-Turn (Onboarding + adaptiver Tool-Loop). Gibt (Antworttext, identity) zurück.
     Wird von /api/chat UND vom Satelliten-Audio-Endpoint genutzt."""
     cfg, sid, ctx, identity, base_working, available_tools, think, mode, onboarding_q = await _prepare_turn(req)
+    ctx["channel"] = channel                  # telegram|satellite|chat → für Tools wie send_image
     debug.log("turn", channel=channel, session=sid, user=(identity or {}).get("username"),
               namespace=ctx["namespace"], mode=mode, think=think, message=req.message[:300])
     if onboarding_q:
@@ -345,6 +346,7 @@ async def chat_stream(req: ChatRequest):
     zweiter Versuch MIT Denken (dann live gestreamt)."""
     import json as _json
     cfg, sid, ctx, identity, base_working, available_tools, think, mode, onboarding_q = await _prepare_turn(req)
+    ctx["channel"] = "browser"                # Web-UI → send_image rendert das Bild im Chat
     debug.log("turn", channel="stream", session=sid, user=(identity or {}).get("username"),
               namespace=ctx["namespace"], mode=mode, think=think, message=req.message[:300])
     _t0 = time.time()

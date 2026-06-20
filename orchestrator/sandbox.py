@@ -88,6 +88,16 @@ def read_file(namespace: str, path: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def read_bytes(namespace: str, path: str, privileged: bool = False) -> dict:
+    """Datei binär (Base64) aus dem Workspace holen — für Bilder/PDFs."""
+    try:
+        r = requests.get(_base(privileged) + "/file_b64",
+                         params={"namespace": namespace, "path": path}, timeout=15)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── browser_control ───────────────────────────────────────────────────────────
 def _post(path: str, payload: dict, timeout: int = 45) -> dict:
     if not config.get().get("sandbox_enabled", True):

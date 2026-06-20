@@ -10,6 +10,7 @@ Erweiterbar: neue interne Tools (web_search, RAG, Wetter …) hier ergänzen.
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 
 import requests
@@ -269,6 +270,24 @@ TOOL_SCHEMAS = [
                     "to_user": {"type": "string", "description": "Optional: Benutzername des Empfängers (sonst der aktuelle Nutzer)."},
                 },
                 "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_image",
+            "description": "Zeigt/sendet dem Nutzer eine im Workspace ERZEUGTE Bilddatei (z.B. ein mit matplotlib "
+                           "erstelltes Diagramm): im Web-Chat wird das Bild angezeigt, per Telegram als Foto gesendet. "
+                           "Rufe dies IMMER auf, nachdem du ein Bild gespeichert hast (z.B. savefig) — und behaupte "
+                           "NIEMALS, ein Bild geschickt/gezeigt zu haben, ohne dieses Werkzeug tatsächlich aufzurufen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Dateipfad im Workspace, z.B. 'chart.png'."},
+                    "caption": {"type": "string", "description": "Optionale Bildunterschrift."},
+                },
+                "required": ["path"],
             },
         },
     },
@@ -1055,6 +1074,36 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
             return "Ich weiß nicht, wem ich schreiben soll — ich erkenne dich gerade nicht."
         ok = await asyncio.to_thread(messaging.send_to_user, uid, text)
         return "Nachricht gesendet." if ok else "Konnte die Nachricht nicht senden (Telegram-ID hinterlegt?)."
+
+    if name == "send_image":
+        path = (args.get("path") or "").strip()
+        caption = (args.get("caption") or "").strip()
+        if not path:
+            return "Mir fehlt der Dateipfad des Bildes."
+        data = await asyncio.to_thread(sandbox.read_bytes, ns, path)
+        if not data.get("ok"):
+            return (f"Bilddatei „{path}“ nicht lesbar: {data.get('error', 'unbekannt')}. "
+                    "Hast du sie wirklich im Workspace gespeichert (z.B. mit savefig)?")
+        fname = data.get("name") or "bild.png"
+        low = fname.lower()
+        mime = "image/png" if low.endswith(".png") else ("image/jpeg" if low.endswith((".jpg", ".jpeg"))
+               else "image/gif" if low.endswith(".gif") else "application/octet-stream")
+        channel = ctx.get("channel") or "browser"
+        if channel == "telegram":
+            uid = ctx.get("user_id")
+            if uid is None:
+                return "Ich erkenne dich gerade nicht — ich weiß nicht, an welchen Telegram-Chat das Bild soll."
+            raw = base64.b64decode(data["b64"])
+            ok = await asyncio.to_thread(messaging.send_photo_to_user, uid, raw, caption, fname)
+            return "Bild per Telegram gesendet." if ok else \
+                   "Telegram-Foto-Versand fehlgeschlagen (verifizierte Chat-ID hinterlegt?)."
+        if channel == "satellite":
+            return "Ich habe das Bild erstellt, kann es auf einem reinen Sprachgerät aber nicht anzeigen."
+        # Web-Chat → Bild als Data-URI über /ws an die Session pushen
+        delivered = await hub.push(sid, {"type": "attachment", "mime": mime, "name": fname, "caption": caption,
+                                         "data_uri": f"data:{mime};base64,{data['b64']}"})
+        return "Bild wird im Chat angezeigt." if delivered else \
+               "Konnte das Bild nicht ausliefern (keine aktive Web-Verbindung zu diesem Chat)."
 
     if name == "fetch_url":
         url = (args.get("url") or "").strip()
