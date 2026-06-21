@@ -1149,17 +1149,21 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
 
 
 def _url_is_safe(url: str) -> bool:
-    """SSRF-Schutz: nur http(s) zu öffentlichen Adressen — keine internen/lokalen Ziele."""
+    """SSRF-Schutz: nur http(s). Private LAN-Adressen nur mit Admin-Freigabe (fetch_allow_lan);
+    Loopback/Link-Local/Reserved/Multicast bleiben IMMER gesperrt."""
     import ipaddress
     import socket
     from urllib.parse import urlparse
+    allow_lan = bool(config.get().get("fetch_allow_lan", False))
     try:
         u = urlparse(url)
         if u.scheme not in ("http", "https") or not u.hostname:
             return False
         for fam, _, _, _, sockaddr in socket.getaddrinfo(u.hostname, None):
             ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            if ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+            if ip.is_private and not allow_lan:
                 return False
         return True
     except Exception:
@@ -1169,7 +1173,10 @@ def _url_is_safe(url: str) -> bool:
 def _fetch_url(url: str, max_chars: int = 4000) -> str:
     """Webseite laden und Titel/Überschriften/Lesetext extrahieren (lxml)."""
     if not _url_is_safe(url):
-        return "Diese URL ist nicht erlaubt (nur öffentliche http/https-Adressen, keine internen Ziele)."
+        if not config.get().get("fetch_allow_lan", False):
+            return ("Diese URL zeigt auf eine interne/lokale Adresse — standardmäßig aus Sicherheitsgründen gesperrt. "
+                    "Der Admin kann LAN-Zugriff im Admin-UI (System → Netzwerkzugriff) aktivieren; dann klappt es.")
+        return "Diese URL ist nicht erlaubt (nur http/https; Loopback/Link-Local bleiben gesperrt)."
     try:
         r = requests.get(url, timeout=12, headers={
             "User-Agent": "Mozilla/5.0 (compatible; JARVIS/1.0; +https://heise.de)",

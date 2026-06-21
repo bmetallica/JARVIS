@@ -207,6 +207,12 @@
                         <label>Job-Timeout (s) <input id="cfg-sandbox_timeout_s" type="number"></label>
                     </div>
                 </fieldset>
+                <fieldset><legend>Netzwerkzugriff (fetch_url / Recherche)</legend>
+                    <p class="muted" style="font-size:11px">Standardmäßig darf <code>fetch_url</code> nur ÖFFENTLICHE Adressen
+                       laden (SSRF-Schutz). Für ein Heimnetz kannst du den Zugriff auf interne LAN-Adressen (z.B.
+                       192.168.x.x — Router, NAS, Geräteseiten) erlauben. Loopback bleibt gesperrt.</p>
+                    <label class="inline"><input type="checkbox" id="cfg-fetch_allow_lan"> Interne LAN-Adressen für fetch_url erlauben</label>
+                </fieldset>
                 <fieldset><legend>Messaging-Kanal (Telegram)</legend>
                     <p class="muted" style="font-size:11px">Fester, geräteunabhängiger Kommunikationsweg: JARVIS meldet
                        Automatisierungen/Alarme zuverlässig hierher und du kannst ihm über Telegram schreiben.

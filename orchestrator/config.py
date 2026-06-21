@@ -47,6 +47,7 @@ _DEFAULTS: dict = {
     "sandbox_enabled": True,                    # Code-Ausführung global an/aus
     "sandbox_allow_network": True,              # Internet im Sandbox-Code (sonst unshare -rn)
     "sandbox_timeout_s": 30,                    # Job-Timeout (Sekunden)
+    "fetch_allow_lan": False,                   # fetch_url darf interne LAN-Adressen laden (SSRF-Lockerung, Heimnetz)
 
     # ── Messaging-Kanal (Telegram) ───────────────────────────────────────────────
     "telegram_enabled": False,

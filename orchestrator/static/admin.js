@@ -64,7 +64,7 @@ const CFG_KEYS = ["llm_url", "llm_model", "vision_model", "llm_max_tokens", "llm
     "thinking_mode", "thinking_budget", "stt_url", "stt_model",
     "stt_language", "tts_engine", "tts_voice_edge", "tts_voice_piper", "tts_voice_kokoro", "tts_url",
     "voice_id_threshold", "system_prompt", "sandbox_url", "sandbox_timeout_s"];
-const CFG_BOOLS = ["sandbox_enabled", "sandbox_allow_network"];
+const CFG_BOOLS = ["sandbox_enabled", "sandbox_allow_network", "fetch_allow_lan"];
 
 async function loadAdmin() {
     RES = await api("GET", "/api/admin/resources");
