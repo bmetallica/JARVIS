@@ -18,6 +18,7 @@ _DEFAULTS: dict = {
     "vision_model": "gemma4-12b",
     "llm_max_tokens": 1024,
     "llm_timeout": 180,
+    "llm_frequency_penalty": 0.3,   # gegen Wiederholungs-/Tool-Schleifen (0 = aus, 0.2–0.6 sinnvoll)
     "thinking_mode": "adaptive",  # adaptive = erst ohne Denken, bei Fehlschlag mit | auto | always | never
     "thinking_budget": 512,
     "debug_enabled": False,

@@ -168,15 +168,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_datetime",
-            "description": "Gibt das aktuelle Datum und die Uhrzeit zurück. Nutze dies bei Fragen "
-                           "nach Zeit/Datum/Wochentag — rate niemals.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "weather",
             "description": "Aktuelles Wetter für einen Ort (Stadt/Region). Liefert Temperatur, "
                            "gefühlte Temperatur, Luftfeuchte, Wind und Wetterlage.",
@@ -981,7 +972,7 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
         out = res.get("result")
         return f"Erledigt: {out}" if out not in (None, "", {}) else "Erledigt."
 
-    if name == "get_datetime":
+    if name == "get_datetime":               # Tool entfernt; Zeit steht im Prompt. Fallback, falls Altverlauf.
         return _get_datetime()
 
     if name == "weather":

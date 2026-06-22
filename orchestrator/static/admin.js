@@ -60,7 +60,7 @@ document.querySelectorAll(".navbtn").forEach((b) => b.onclick = () => {
 });
 
 // ── Verwaltung laden/rendern ────────────────────────────────────────────────
-const CFG_KEYS = ["llm_url", "llm_model", "vision_model", "llm_max_tokens", "llm_timeout",
+const CFG_KEYS = ["llm_url", "llm_model", "vision_model", "llm_max_tokens", "llm_timeout", "llm_frequency_penalty",
     "thinking_mode", "thinking_budget", "stt_url", "stt_model",
     "stt_language", "tts_engine", "tts_voice_edge", "tts_voice_piper", "tts_voice_kokoro", "tts_url",
     "voice_id_threshold", "system_prompt", "sandbox_url", "sandbox_timeout_s"];

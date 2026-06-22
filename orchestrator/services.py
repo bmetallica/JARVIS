@@ -85,6 +85,31 @@ def _thinking_kwargs(cfg: dict, think: bool) -> dict:
     return {"enable_thinking": False}
 
 
+def _post_llm(url: str, payload: dict, timeout: int, stream: bool = False):
+    """POST mit kurzem Retry bei transienten 5xx/Verbindungsfehlern — llama-swap wirft beim
+    Modell-Laden gern kurz 502. Bis zu 3 Versuche mit zunehmender Pause."""
+    import time as _t
+    last = None
+    for attempt in range(3):
+        try:
+            r = requests.post(url, json=payload, timeout=timeout, stream=stream)
+            if r.status_code >= 500:                       # transient (Gateway/Modell lädt) → erneut versuchen
+                last = requests.exceptions.HTTPError(f"{r.status_code} {r.reason}", response=r)
+                try:
+                    r.close()
+                except Exception:
+                    pass
+                _t.sleep(1.5 * (attempt + 1))
+                continue
+            return r
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last = e
+            _t.sleep(1.5 * (attempt + 1))
+    if last:
+        raise last
+    raise requests.exceptions.HTTPError("LLM-Server nicht erreichbar")
+
+
 def llm_call(messages: list[dict], cfg: dict, tools: list | None = None, think: bool = False) -> dict:
     """Chat-Aufruf mit optionalem Tool-Calling. Gibt
     {content, tool_calls:[{id,name,args}], raw, finish} zurück.
@@ -98,10 +123,13 @@ def llm_call(messages: list[dict], cfg: dict, tools: list | None = None, think: 
         "max_tokens": int(cfg.get("llm_max_tokens", 1024)),
         "chat_template_kwargs": _thinking_kwargs(cfg, think),
     }
+    _fp = float(cfg.get("llm_frequency_penalty", 0.3))   # gegen Wiederholungs-/Tool-Schleifen
+    if _fp:
+        payload["frequency_penalty"] = _fp
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=timeout)
+    resp = _post_llm(f"{url}/v1/chat/completions", payload, timeout)
     resp.raise_for_status()
     choice  = resp.json()["choices"][0]
     msg     = choice.get("message", {}) or {}
@@ -173,13 +201,16 @@ def llm_stream(messages: list[dict], cfg: dict, tools: list | None = None, think
         "max_tokens": int(cfg.get("llm_max_tokens", 1024)),
         "chat_template_kwargs": _thinking_kwargs(cfg, think),
     }
+    _fp = float(cfg.get("llm_frequency_penalty", 0.3))   # gegen Wiederholungs-/Tool-Schleifen
+    if _fp:
+        payload["frequency_penalty"] = _fp
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
     full, buf = "", ""
     tc_frag: dict = {}
-    with requests.post(f"{url}/v1/chat/completions", json=payload, timeout=timeout, stream=True) as resp:
+    with _post_llm(f"{url}/v1/chat/completions", payload, timeout, stream=True) as resp:
         resp.raise_for_status()
         for raw in resp.iter_lines():
             if not raw:

@@ -165,8 +165,8 @@ def _now_hint() -> str:
 
 
 _TOOL_HINT = (
-    "\n\nWerkzeuge: Timer/Wecker (set_timer, list_timers, cancel_timer), aktuelle "
-    "Zeit/Datum (get_datetime — bei Zeitfragen IMMER aufrufen, nie raten), Wetter "
+    "\n\nWerkzeuge: Timer/Wecker (set_timer, list_timers, cancel_timer). "
+    "Das aktuelle Datum/die Uhrzeit stehen bereits oben im Prompt — nutze sie direkt, KEIN Werkzeug dafür. Wetter "
     "(weather), Web-Suche (web_search — für aktuelle Infos/Fakten/News) und Seitenabruf "
     "(fetch_url — den INHALT einer konkreten Seite holen, z.B. Schlagzeilen von einer Newsseite; "
     "für News bevorzugt fetch_url statt nur web_search). "
@@ -339,13 +339,22 @@ async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: l
         debug.log("llm", think=think, ms=int((time.time() - t0) * 1000),
                   tool_calls=[t["name"] for t in res["tool_calls"]], content_len=len(res["content"]))
         if res["tool_calls"]:
-            if _degenerate_calls(res["tool_calls"], seen):
+            if len(res["tool_calls"]) > _MAX_CALLS_PER_STEP:      # absurd viele auf einmal = Degeneration
                 debug.log("tool_loop_abort", count=len(res["tool_calls"]))
-                return {"ok": True, "content": _LOOP_MSG}     # ok=True → wird ausgeliefert, NICHT erneut versucht
+                return {"ok": False, "content": _LOOP_MSG, "error": "tool-loop"}  # ok=False → adaptiv mit Denken neu
             working.append(res["raw"])
             for tc in res["tool_calls"]:
-                result = await tools.execute_tool(tc["name"], tc["args"], ctx)
+                key = tc["name"] + "|" + json.dumps(tc.get("args") or {}, sort_keys=True)
+                if key in seen:                                  # identischer Aufruf → Cache + Nudge statt erneut
+                    result = seen[key] + "\n\n(Hinweis: bereits abgerufen — nutze dieses Ergebnis und ANTWORTE " \
+                             "jetzt dem Nutzer, rufe das Werkzeug NICHT erneut auf.)"
+                else:
+                    result = await tools.execute_tool(tc["name"], tc["args"], ctx)
+                    seen[key] = result
                 working.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+            if len(seen) > 12:                                   # zu viele UNTERSCHIEDLICHe Aufrufe → Notbremse
+                debug.log("tool_loop_abort", unique=len(seen))
+                return {"ok": False, "content": _LOOP_MSG, "error": "tool-loop"}
             continue
         return {"ok": bool(res["content"]), "content": res["content"]}
     return {"ok": False, "content": ""}
@@ -434,13 +443,22 @@ async def chat_stream(req: ChatRequest):
                 elif ev["type"] == "done":
                     done = ev
             if done and done["tool_calls"]:
-                if _degenerate_calls(done["tool_calls"], seen):
+                if len(done["tool_calls"]) > _MAX_CALLS_PER_STEP:
                     debug.log("tool_loop_abort", channel="stream", count=len(done["tool_calls"]))
                     yield ("final", _LOOP_MSG); return
                 working.append(done["raw"])
                 for tc in done["tool_calls"]:
-                    result = await tools.execute_tool(tc["name"], tc["args"], ctx)
+                    key = tc["name"] + "|" + json.dumps(tc.get("args") or {}, sort_keys=True)
+                    if key in seen:
+                        result = seen[key] + "\n\n(Hinweis: bereits abgerufen — nutze dieses Ergebnis und " \
+                                 "ANTWORTE jetzt, rufe das Werkzeug NICHT erneut auf.)"
+                    else:
+                        result = await tools.execute_tool(tc["name"], tc["args"], ctx)
+                        seen[key] = result
                     working.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                if len(seen) > 12:
+                    debug.log("tool_loop_abort", channel="stream", unique=len(seen))
+                    yield ("final", _LOOP_MSG); return
                 continue
             yield ("final", (done or {}).get("content", "")); return
         yield ("final", "")
