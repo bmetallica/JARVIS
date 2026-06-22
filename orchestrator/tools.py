@@ -667,9 +667,16 @@ TOOL_SCHEMAS = [
 ]
 
 
+# Werkzeuge, die für Entwicklung/Bau stehen → schalten den „Dev-Modus" der Session an (erzwingt Denken).
+_DEV_TOOLS = {"create_skill", "update_skill", "delete_skill", "run_python", "run_shell",
+              "browse", "browser_click", "browser_type", "browser_screenshot", "create_watch_automation"}
+
+
 async def execute_tool(name: str, args: dict, ctx: dict) -> str:
     """Wrapper mit Debug-Aufzeichnung (Tool-Name, Argumente, Ergebnis, Dauer)."""
     t0 = time.time()
+    if name in _DEV_TOOLS:
+        hub.mark_dev(ctx.get("session_id"))
     result = await _execute_tool_impl(name, args, ctx)
     debug.log("tool", name=name, args=args, result=str(result)[:400],
               ms=int((time.time() - t0) * 1000), user_id=ctx.get("user_id"))

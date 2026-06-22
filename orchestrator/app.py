@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -201,6 +202,17 @@ _TOOL_HINT = (
 MAX_TOOL_STEPS = 8     # mehrstufige MCP-Abfragen (Gerät suchen → Wert lesen → …) brauchen mehr Schritte
 
 
+# Entwicklungs-/Programmier-Anfragen → adaptiver Modus schaltet aufs Denken (Wortgrenzen, DE+EN).
+_DEV_RE = re.compile(
+    r"\b(api|code|coden|coding|repo|repository|github|bug|debug|skript|script|skill|skills|"
+    r"programm\w*|entwickl\w*|develop\w*|implementier\w*|refactor\w*|automatisier\w*|patch\w*)\b",
+    re.IGNORECASE)
+
+
+def _is_dev_request(message: str) -> bool:
+    return bool(_DEV_RE.search(message or ""))
+
+
 async def _prepare_turn(req: ChatRequest):
     """Gemeinsame Vorbereitung für Stream- und Nicht-Stream-Chat:
     Identität, Sprecherwechsel-Reset, System-Prompt (+Recall), Verlauf, Tools."""
@@ -283,6 +295,10 @@ async def _prepare_turn(req: ChatRequest):
         think = guest_voice or has_mcp
     if answering_onboarding:
         think = True                  # Registrierungs-Antwort zuverlässig (mit Denken) verarbeiten
+    # Entwicklung/Programmierung (Skills/Code/Browser-Automation) → Denken ERZWINGEN, auch im adaptive-Modus.
+    # Erkannt an Dev-Schlüsselwörtern in der Anfrage ODER laufendem Dev-Flow der Session (klebt ~15 min).
+    if mode in ("adaptive", "auto") and (_is_dev_request(req.message) or hub.is_dev(sid)):
+        think, mode = True, "always"  # mode=always → adaptive Fast-Pass überspringen, direkt mit Denken
     return cfg, sid, ctx, identity, working, available_tools, think, mode, onboarding_q
 
 

@@ -28,6 +28,15 @@ class SessionHub:
         self._last_voice: dict = {}  # session_id -> letztes Stimm-Embedding (fürs Onboarding)
         self._onboard: dict = {}     # session_id -> None | "asked" | "skipped"
         self._seen: dict = {}        # session_id -> {first, last, **telemetry}  (für Geräteliste)
+        self._dev: dict = {}         # session_id -> ts (Dev-/Bau-Modus aktiv → Denken erzwingen)
+
+    def mark_dev(self, session_id: str | None) -> None:
+        """Session ist in einem Entwicklungs-/Bau-Flow (Skill/Code/Browser-Automation)."""
+        if session_id:
+            self._dev[session_id] = time.time()
+
+    def is_dev(self, session_id: str | None, ttl: float = 900) -> bool:
+        return bool(session_id) and (time.time() - self._dev.get(session_id, 0) < ttl)
 
     def set_last_voice(self, session_id: str, embedding) -> None:
         self._last_voice[session_id] = embedding
