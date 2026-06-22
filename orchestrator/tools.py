@@ -1197,6 +1197,12 @@ def _fetch_url(url: str, max_chars: int = 4000) -> str:
         html = raw.decode(r.encoding or "utf-8", "replace")
     except Exception as e:
         return f"Abruf fehlgeschlagen: {e}"
+    # Quelltext/JSON/Plaintext (kein HTML/XML) → ROH & vollständig zurückgeben (bis 50k),
+    # damit das LLM z.B. eine index.js komplett lesen kann statt zu raten.
+    if "html" not in ctype and "xml" not in ctype:
+        LIM = 50000
+        return (f"Quelle: {url} ({ctype})\n\n" + html[:LIM]
+                + (f"\n…[gekürzt — {len(html)} Zeichen gesamt]" if len(html) > LIM else ""))
     try:
         from lxml import html as lxml_html
         doc = lxml_html.fromstring(html)
