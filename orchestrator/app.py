@@ -302,10 +302,32 @@ async def _prepare_turn(req: ChatRequest):
     return cfg, sid, ctx, identity, working, available_tools, think, mode, onboarding_q
 
 
+# ── Degenerations-Schutz für den Tool-Loop ───────────────────────────────────
+# Manche Modelle geraten in eine Schleife und rufen dasselbe Werkzeug zig-/hundertfach auf.
+_MAX_CALLS_PER_STEP = 15      # so viele Tool-Calls in EINER Antwort = sicher Degeneration
+_REPEAT_ABORT = 4            # dasselbe (Name+Argumente) öfter im Turn = Schleife
+_LOOP_MSG = ("Ich bin in eine Werkzeug-Schleife geraten und habe abgebrochen, bevor es ausartet. "
+             "Bitte formuliere die Anfrage etwas anders — oder schau, ob das Skill/Werkzeug wirklich ein "
+             "Ergebnis liefert.")
+
+
+def _degenerate_calls(calls: list, seen: dict) -> bool:
+    """True, wenn die Tool-Calls auf eine Schleife hindeuten (zu viele auf einmal / Wiederholung)."""
+    if len(calls) > _MAX_CALLS_PER_STEP:
+        return True
+    for tc in calls:
+        key = (str(tc.get("name", "")) + "|" + json.dumps(tc.get("args") or {}, sort_keys=True))[:300]
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] > _REPEAT_ABORT:
+            return True
+    return False
+
+
 async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: list, think: bool) -> dict:
     """Tool-Loop (nicht streamend) auf einer Kopie des Verlaufs. Gibt {ok, content} zurück.
     ok=False bei: zu vielen Schritten, leerer Antwort oder LLM-Fehler (→ Trigger für adaptiven Retry)."""
     working = list(base_working)
+    seen: dict = {}
     for _ in range(MAX_TOOL_STEPS):
         t0 = time.time()
         tools_now = available_tools + skills.schemas_for(ctx.get("loaded_skills"))   # deferred: geladene Skills dazu
@@ -317,6 +339,9 @@ async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: l
         debug.log("llm", think=think, ms=int((time.time() - t0) * 1000),
                   tool_calls=[t["name"] for t in res["tool_calls"]], content_len=len(res["content"]))
         if res["tool_calls"]:
+            if _degenerate_calls(res["tool_calls"], seen):
+                debug.log("tool_loop_abort", count=len(res["tool_calls"]))
+                return {"ok": True, "content": _LOOP_MSG}     # ok=True → wird ausgeliefert, NICHT erneut versucht
             working.append(res["raw"])
             for tc in res["tool_calls"]:
                 result = await tools.execute_tool(tc["name"], tc["args"], ctx)
@@ -381,6 +406,7 @@ async def chat_stream(req: ChatRequest):
         """Streamt einen Lauf MIT Tool-Loop. Yields SSE-Strings; setzt self._content am Ende."""
         loop = asyncio.get_running_loop()
         working = list(base_working)
+        seen: dict = {}
         for _ in range(MAX_TOOL_STEPS):
             q: asyncio.Queue = asyncio.Queue()
             tools_now = available_tools + skills.schemas_for(ctx.get("loaded_skills"))   # deferred: geladene Skills
@@ -408,6 +434,9 @@ async def chat_stream(req: ChatRequest):
                 elif ev["type"] == "done":
                     done = ev
             if done and done["tool_calls"]:
+                if _degenerate_calls(done["tool_calls"], seen):
+                    debug.log("tool_loop_abort", channel="stream", count=len(done["tool_calls"]))
+                    yield ("final", _LOOP_MSG); return
                 working.append(done["raw"])
                 for tc in done["tool_calls"]:
                     result = await tools.execute_tool(tc["name"], tc["args"], ctx)
