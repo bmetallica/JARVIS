@@ -1413,7 +1413,11 @@ async def _exec_skill(s: dict, sargs: dict, ns: str, ctx: dict) -> str:
     if not r["ok"]:
         return (f"Skill „{s['name']}“ Fehler: {r['error']}\n"
                 "Du kannst das Skill mit update_skill korrigieren (gib den verbesserten Code an).")
-    return f"Ergebnis von {s['name']}: {r['result']}"
+    res_str = str(r["result"])
+    if len(res_str) > 6000:
+        res_str = (res_str[:6000] + f" …[gekürzt — {len(res_str)} Zeichen gesamt; filtere/aggregiere große "
+                   "Ergebnisse besser direkt im Skill, statt alles roh zurückzugeben]")
+    return f"Ergebnis von {s['name']}: {res_str}"
 
 
 def _format_sandbox_result(res: dict) -> str:

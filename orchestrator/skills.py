@@ -72,8 +72,9 @@ def _by_name(name: str) -> dict | None:
 
 
 # ── Ausführung in der Sandbox ────────────────────────────────────────────────
-def _wrap(code: str, args: dict) -> str:
-    """Skill-Code einbetten: `args` bereitstellen, danach `run(args)` aufrufen und Ergebnis ausgeben."""
+def _wrap(code: str, args: dict, token: str) -> str:
+    """Skill-Code einbetten: `args` bereitstellen, `run(args)` aufrufen, Ergebnis in eine Datei
+    schreiben (umgeht die stdout-Kappung bei großen Ergebnissen) UND als Marker ausgeben (Fallback)."""
     tmpl = (
         "import site as _site, sys as _sys\n"                 # pip --user-Pakete importierbar machen (auch unter -I)
         "_sys.path.append(_site.getusersitepackages())\n"
@@ -85,11 +86,14 @@ def _wrap(code: str, args: dict) -> str:
         "    _out = {'error': 'Das Skill muss eine Funktion run(args) definieren, die das Ergebnis per return zurueckgibt.'}\n"
         "else:\n"
         "    _out = {'result': _run(args)}\n"
-        "print('__MARK__' + _json.dumps(_out, default=str))\n"
+        "_payload = _json.dumps(_out, default=str)\n"
+        "open('.skill___TOKEN__.json', 'w', encoding='utf-8').write(_payload)\n"   # vollständig (keine Kappung)
+        "print('__MARK__' + _payload)\n"                                           # Fallback für kleine Ergebnisse
     )
     return (tmpl
             .replace("__ARGS__", repr(json.dumps(args or {}, ensure_ascii=False)))
             .replace("__MARK__", _MARK)
+            .replace("__TOKEN__", token)
             .replace("__CODE__", code or ""))
 
 
@@ -118,15 +122,27 @@ def syntax_ok(code: str) -> tuple[bool, str]:
 def run_skill_code(code: str, args: dict, namespace: str, net: bool, trust: str = "sandbox") -> dict:
     """Skill-Code einmal ausführen. trust='elevated' → privilegierte Spur (Hostnetz+NET_RAW).
     Rückgabe {"ok": True, "result": …} oder {"ok": False, "error": …}."""
+    import base64
+    import uuid
     priv = (trust == "elevated")
-    res = sandbox.execute(_wrap(code, args), "python", namespace, allow_network=bool(net), privileged=priv)
+    token = uuid.uuid4().hex
+    res = sandbox.execute(_wrap(code, args, token), "python", namespace, allow_network=bool(net), privileged=priv)
     if res.get("disabled"):
         return {"ok": False, "error": "Code-Sandbox ist deaktiviert (Admin)."}
     if res.get("offline"):
         return {"ok": False, "error": res.get("stderr", "Code-Sandbox nicht erreichbar.")}
     if not res.get("ok"):
         return {"ok": False, "error": (res.get("stderr") or "Skript-Fehler").strip()[:800]}
-    parsed = _parse(res.get("stdout"))
+    # Ergebnis aus der Datei lesen (vollständig); Fallback auf den stdout-Marker (kleine Ergebnisse).
+    parsed = None
+    fr = sandbox.read_bytes(namespace, f".skill_{token}.json", privileged=priv)
+    if fr.get("ok"):
+        try:
+            parsed = json.loads(base64.b64decode(fr["b64"]).decode("utf-8", "replace"))
+        except Exception:
+            parsed = None
+    if parsed is None:
+        parsed = _parse(res.get("stdout"))
     if parsed is None:
         return {"ok": False, "error": "Skill gab kein Ergebnis aus.\n" + (res.get("stdout") or "")[:400]}
     if "error" in parsed:
