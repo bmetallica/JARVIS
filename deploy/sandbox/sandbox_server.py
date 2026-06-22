@@ -297,7 +297,7 @@ async def _get_page(ns: str):
     return _page[ns]
 
 
-async def _page_snapshot(page, max_chars: int = 4000) -> dict:
+async def _page_snapshot(page, max_chars: int = 15000) -> dict:
     try:
         text = " ".join((await page.inner_text("body")).split())
     except Exception:
@@ -345,10 +345,26 @@ async def browser_act(req: ActReq):
     try:
         page = await _get_page(req.namespace)
         if req.action == "click":
-            try:
-                await page.get_by_text(req.text, exact=False).first.click(timeout=8000)
-            except Exception:
-                await page.click(req.text, timeout=8000)        # Fallback: CSS-Selektor
+            t = req.text
+            strategies = (
+                lambda: page.get_by_text(t, exact=False).first,
+                lambda: page.get_by_role("button", name=t).first,
+                lambda: page.get_by_role("link", name=t).first,
+                lambda: page.get_by_title(t).first,
+                lambda: page.get_by_label(t).first,
+                lambda: page.locator(t).first,                  # CSS-Selektor
+            )
+            clicked = False
+            for getter in strategies:
+                try:
+                    await getter().click(timeout=4000)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+            if not clicked:
+                return {"ok": False, "error": f"Element „{t}“ nicht zum Klicken gefunden "
+                        "(Text/Rolle/Title/Label/CSS geprüft)."}
         elif req.action == "type":
             loc = None
             for getter in (lambda: page.get_by_label(req.text),

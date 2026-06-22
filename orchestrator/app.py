@@ -188,6 +188,13 @@ _TOOL_HINT = (
     "(isolierte Sandbox) nutzen — rechne/rate solche Dinge NICHT selbst, sondern führe Code aus und nutze dessen Ausgabe. "
     "Erfinde NIEMALS Fakten (Wetter, Uhrzeit, Suchergebnisse) — nutze immer das Werkzeug. "
     "Wenn ein Werkzeug 'Berechtigung verweigert' zurückgibt, sage der Person ehrlich, dass sie dazu keine Berechtigung hat. "
+    "HANDLE statt anzukündigen: Wenn du sagst, dass du etwas tust (Skill bauen/ändern, Aktion auslösen), dann führe es in "
+    "DERSELBEN Antwort per Werkzeug aus — schreibe NICHT 'ich werde jetzt…' und höre dann auf. Behaupte NIE, etwas getan "
+    "zu haben (Skill erstellt/geändert, gesendet, ausgelöst), ohne das Werkzeug wirklich aufgerufen zu haben. "
+    "Erfinde KEINE Daten in Skills (z.B. fest eingetragene Listen) — hol sie zur Laufzeit aus der echten Quelle. "
+    "Brauchst du die API/Funktionsweise eines GitHub-Projekts, lies die ECHTEN Quelldateien über raw.githubusercontent.com "
+    "(per fetch_url) statt nur web_search/research-Zusammenfassungen. "
+    "Eigene Skills darfst du jederzeit mit update_skill ändern (nicht für jede Korrektur ein neues anlegen). "
     "Rufe das passende Werkzeug auf und antworte danach kurz auf Deutsch."
 )
 
