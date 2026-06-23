@@ -1,7 +1,7 @@
 # SH-Jarvis — Bekannte & absehbare Probleme (mit Lösungen ohne neue Hardware)
 
 > Stand: 2026-06-23. Bezug: Agenten-Kern (Orchestrator + LLM-Tool-Loop). Hardware-Rahmen:
-> **3× NVIDIA RTX 3060 = 36 GB VRAM gesamt**. Alle Lösungen hier kommen **ohne Hardware-Erweiterung** aus
+> **2× NVIDIA RTX 3060 = 24 GB VRAM gesamt**. Alle Lösungen hier kommen **ohne Hardware-Erweiterung** aus
 > (Modellwahl/Quantisierung/Software/Architektur). Priorität: 🔴 hoch · 🟡 mittel · 🟢 niedrig.
 > Legende Status: `[offen]` · `[teilweise]` · `[erledigt]`.
 
@@ -105,14 +105,18 @@ begrenzt mit „im Skill filtern"-Hinweis; DPM-Skill auf `pu>0`-Filter umgebaut 
 ## 7. 🟡 Modell-Leistungsdecke: gemma-12b ist für werkzeugreiche Agentenarbeit grenzwertig  `[offen]`
 **Kernbefund der Sitzung:** Die Infrastruktur ist solide; die Rest-Unzuverlässigkeit ist die **Modellgrenze**.
 
-**Lösung ohne Hardware (größter nachhaltiger Hebel):** **Ein stärkeres Modell, das auf die vorhandenen 36 GB
-passt.** 3×3060 (36 GB) tragen via **Tensor-Parallelismus (vLLM)** ein **~27–32B-Modell in Q4** (~18–22 GB +
-KV-Cache). Solche Modelle sind in **Tool-Auswahl/Function-Calling deutlich zuverlässiger** als ein 12B.
-- Konkret prüfen: Qwen2.5-32B-Instruct (sehr gut im Tool-Use), Qwen3-30B/32B, oder ein auf Function-Calling
-  feingetuntes Modell — jeweils Q4/AWQ, tensor-parallel über die 3 GPUs.
-- **vLLM** hält das Modell resident (löst nebenbei Punkt 4) und parallelisiert über die GPUs — das ist „die
-  Hardware endlich ausnutzen", keine Erweiterung.
-- Alternativ: das aktuelle Modell bleibt für Smalltalk, ein stärkeres NUR für Agenten-/Tool-Turns (Routing).
+**Lösung ohne Hardware (größter nachhaltiger Hebel):** **Ein in Tool-Use stärkeres Modell, das auf die
+vorhandenen 24 GB passt.** 2×3060 (24 GB) tragen via **Tensor-Parallelismus (vLLM)**:
+- **Sweet Spot: ein 14B-Modell in Q5/Q6** (~10–13 GB) → reichlich Platz für KV-Cache/Kontext, spürbar besserer
+  Function-Caller als gemma-12b. Konkret prüfen: **Qwen2.5-14B-Instruct** oder **Qwen3-14B** (beide sehr gut im
+  Tool-Use).
+- **Grenzbereich: 27–32B in Q4** (~16–20 GB) passt in 24 GB, aber **Kontext/KV-Cache wird knapp** → kleineres
+  Kontextfenster, langsamer. Nur sinnvoll, wenn Tool-Zuverlässigkeit Vorrang vor Tempo/Kontext hat
+  (z.B. das bereits vorhandene gemma4-26b, oder Qwen2.5-32B Q4 mit reduziertem Kontext).
+- **vLLM** hält EIN Modell resident (löst nebenbei Punkt 4 – kein Lade-502) und nutzt beide GPUs gemeinsam —
+  das ist „die Hardware ausnutzen", keine Erweiterung. (Realistisch nur EIN gutes Modell gleichzeitig in 24 GB.)
+- Alternativ: das aktuelle kleine Modell bleibt für Smalltalk, ein stärkeres NUR für Agenten-/Tool-Turns
+  (Routing) — aber bei 24 GB konkurrieren zwei Modelle um knappen VRAM, daher eher EIN gutes Modell.
 
 ---
 
@@ -171,8 +175,9 @@ ggf. anderes Wake-Modell. Barge-In (AEC) nur Mono, da CPU-begrenzt.
 ---
 
 ## Kurzfazit / Priorisierung
-1. **Stärkeres Modell auf den vorhandenen 36 GB via vLLM (tensor-parallel), resident** — adressiert auf einen
-   Schlag Punkt 1, 2, 4, 7 und 8 am nachhaltigsten. Keine neue Hardware nötig.
+1. **Stärkeres (tool-fähiges) Modell auf den vorhandenen 24 GB via vLLM (tensor-parallel), resident** —
+   z.B. Qwen2.5-14B Q5/Q6; adressiert auf einen Schlag Punkt 1, 2, 4, 7 und 8 am nachhaltigsten.
+   Keine neue Hardware nötig.
 2. **Tool-Subsetting / Deferred-Loading auf alle Tool-Kategorien** (Punkt 1/9) — entlastet jedes Modell.
 3. **Denken für Agenten-Turns** (Punkt 2) — sofort wirksam, reine Config/Heuristik.
 4. Rest sind Feinschliff/Hygiene.
