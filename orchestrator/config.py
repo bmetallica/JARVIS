@@ -82,6 +82,8 @@ _DEFAULTS: dict = {
     # ── Obsidian-Notizen (pro Nutzer eine Vault) ─────────────────────────────────
     "obsidian_enabled": True,
     "obsidian_inbox": "Inbox.md",    # Datei (relativ zur Vault), in die kurze Notizen angehängt werden
+    "obsidian_autolink": True,       # neue Notizen automatisch per [[Wikilinks]] zu Themen/Notizen verbinden
+    "obsidian_autolink_max": 4,      # höchstens so viele automatische Links pro Notiz
     # Zuordnung JARVIS-Nutzername (klein) → absoluter Vault-Pfad auf dem Host.
     "obsidian_vaults": {"daniel": "/opt/obsidian/config/Daniel"},
 }

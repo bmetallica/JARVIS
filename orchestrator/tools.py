@@ -30,6 +30,7 @@ import sandbox
 import services
 import skills
 import timers
+import todos
 import watchers
 from session_hub import hub
 
@@ -209,6 +210,65 @@ TOOL_SCHEMAS = [
                 "properties": {"fact": {"type": "string", "description": "Der zu merkende Fakt, knapp formuliert"}},
                 "required": ["fact"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_todo",
+            "description": "Setzt einen Punkt auf die persönliche To-do-Liste des Nutzers ('schreibe … auf meine "
+                           "To-do', 'notiere als Aufgabe …'). Mit Datum (ISO, optional) erscheint er zusätzlich im "
+                           "Kalender. Datum aus relativen Angaben ('nächste Woche Mittwoch') anhand des Datums oben.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"},
+                               "due": {"type": "string", "description": "Fälligkeitsdatum YYYY-MM-DD (optional)."}},
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_todos",
+            "description": "Listet die To-do-Punkte des Nutzers ('was ist auf meiner To-do', 'welche Punkte stehen "
+                           "an'). scope: open (Standard) | all | done.",
+            "parameters": {"type": "object",
+                           "properties": {"scope": {"type": "string", "description": "open|all|done"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_todo",
+            "description": "Markiert einen To-do-Punkt als ERLEDIGT. Der Punkt wird per Ähnlichkeitssuche gefunden "
+                           "('Äpfel holen ist erledigt'). Optional auf ein Datum eingrenzen (due, YYYY-MM-DD).",
+            "parameters": {
+                "type": "object",
+                "properties": {"item": {"type": "string", "description": "Ungefähre Beschreibung des Punkts."},
+                               "due": {"type": "string", "description": "Datum zur Eingrenzung (optional)."}},
+                "required": ["item"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_todo",
+            "description": "Löscht einen To-do-Punkt (per Ähnlichkeitssuche). Optional auf ein Datum eingrenzen.",
+            "parameters": {
+                "type": "object",
+                "properties": {"item": {"type": "string"}, "due": {"type": "string"}},
+                "required": ["item"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_link",
+            "description": "Nennt den Hardlink zur smartphone-optimierten To-do-Liste des Nutzers (ohne Login abhakbar).",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -1085,6 +1145,58 @@ def _calendar_dispatch(name: str, args: dict, ctx: dict, uid: int) -> str:
     return "Unbekannte Kalenderaktion."
 
 
+_TODO_TOOLS = {"add_todo", "list_todos", "complete_todo", "remove_todo", "todo_link"}
+
+
+def _todo_dispatch(name: str, args: dict, ctx: dict, uid: int) -> str:
+    """Synchroner To-do-Handler (läuft im Thread; todos.* ist DB-basiert)."""
+    cfg = ctx.get("cfg") or config.get()
+    if name == "add_todo":
+        text = (args.get("text") or "").strip()
+        if not text:
+            return "Was genau soll auf die To-do-Liste?"
+        t = todos.add(uid, text, (args.get("due") or "").strip() or None)
+        extra = f" (fällig {t['due_date']} — steht auch im Kalender)" if t["due_date"] else ""
+        return f"„{t['text']}“ steht jetzt auf deiner To-do-Liste{extra}."
+
+    if name == "list_todos":
+        scope = (args.get("scope") or "open").lower()
+        items = todos.list_todos(uid, include_done=(scope in ("all", "done")))
+        if scope == "done":
+            items = [t for t in items if t["done"]]
+        elif scope == "open":
+            items = [t for t in items if not t["done"]]
+        if not items:
+            return "Deine To-do-Liste ist leer."
+        lines = []
+        for t in items:
+            box = "✓" if t["done"] else "•"
+            due = f" (bis {t['due_date']})" if t["due_date"] else ""
+            lines.append(f"{box} {t['text']}{due}")
+        return "Deine To-do-Liste:\n" + "\n".join(lines)
+
+    if name == "complete_todo":
+        t = todos.match(uid, args.get("item") or "", (args.get("due") or "").strip() or None)
+        if not t:
+            return f"Ich finde „{args.get('item')}“ nicht auf deiner offenen To-do-Liste."
+        todos.set_done(t["id"], True)
+        return f"Erledigt — „{t['text']}“ abgehakt."
+
+    if name == "remove_todo":
+        t = todos.match(uid, args.get("item") or "", (args.get("due") or "").strip() or None)
+        if not t:
+            return f"Ich finde „{args.get('item')}“ nicht auf deiner To-do-Liste."
+        todos.remove(t["id"])
+        return f"„{t['text']}“ von der To-do-Liste entfernt."
+
+    if name == "todo_link":
+        base = (cfg.get("calendar_base_url") or "").rstrip("/")
+        return (f"Deine To-do-Liste (smartphone-optimiert, ohne Login abhakbar):\n"
+                f"{base}/todo/{todos.share_token(uid)}")
+
+    return "Unbekannte To-do-Aktion."
+
+
 async def execute_tool(name: str, args: dict, ctx: dict) -> str:
     """Wrapper mit Debug-Aufzeichnung (Tool-Name, Argumente, Ergebnis, Dauer)."""
     t0 = time.time()
@@ -1481,6 +1593,13 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
             return ("Kalender sind pro Nutzer — dafür müsstest du als erkannter Nutzer angemeldet sein "
                     "(Stimme/Telegram/Login).")
         return await asyncio.to_thread(_calendar_dispatch, name, args, ctx, uid)
+
+    if name in _TODO_TOOLS:
+        uid = ctx.get("user_id")
+        if not uid:
+            return ("To-do-Listen sind pro Nutzer — dafür müsstest du als erkannter Nutzer angemeldet sein "
+                    "(Stimme/Telegram/Login).")
+        return await asyncio.to_thread(_todo_dispatch, name, args, ctx, uid)
 
     if name == "save_memory":
         fact = (args.get("fact") or "").strip()

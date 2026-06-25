@@ -685,6 +685,8 @@ $("btn-add-group").onclick = async () => {
 
 async function loadUsers() {
     const users = (await api("GET", "/api/admin/users")).users;
+    let vaults = {};
+    try { vaults = (await api("GET", "/api/config")).obsidian_vaults || {}; } catch { /* ignore */ }
     const el = $("users"); el.innerHTML = "";
     for (const u of users) {
         const div = document.createElement("div"); div.className = "item";
@@ -706,13 +708,21 @@ async function loadUsers() {
             <span class="muted" data-recst="${u.id}"></span></div>
             <div class="row"><label class="inline" style="flex:1">✈ Telegram-Chat-ID
                 <input data-tgid="${u.id}" value="${u.telegram_chat_id || ''}" placeholder="z. B. 123456789" style="width:160px"></label>
-            <button class="small" data-savtg="${u.id}">ID speichern</button></div>`;
+            <button class="small" data-savtg="${u.id}">ID speichern</button></div>
+            <div class="row"><label class="inline" style="flex:1">📓 Obsidian-Vault-Pfad
+                <input data-obsv="${u.username}" value="${escAttr(vaults[u.username.toLowerCase()] || '')}" placeholder="/opt/obsidian/config/${u.username}" style="width:260px"></label>
+            <button class="small" data-savobs="${u.username}">Vault speichern</button></div>`;
         el.appendChild(div);
     }
     el.querySelectorAll("[data-savtg]").forEach((b) => b.onclick = async () => {
         const v = document.querySelector(`[data-tgid="${b.dataset.savtg}"]`).value.trim();
         await api("POST", "/api/admin/users/telegram", { id: +b.dataset.savtg, chat_id: v });
         b.textContent = "✓"; setTimeout(() => b.textContent = "ID speichern", 1500);
+    });
+    el.querySelectorAll("[data-savobs]").forEach((b) => b.onclick = async () => {
+        const path = document.querySelector(`[data-obsv="${b.dataset.savobs}"]`).value.trim();
+        await api("POST", "/api/admin/users/obsidian", { username: b.dataset.savobs, path });
+        b.textContent = "✓"; setTimeout(() => b.textContent = "Vault speichern", 1500);
     });
     el.querySelectorAll("[data-savu]").forEach((b) => b.onclick = () => saveUserGroups(+b.dataset.savu));
     el.querySelectorAll("[data-resu]").forEach((b) => b.onclick = () => resetPw(+b.dataset.resu));

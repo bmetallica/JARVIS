@@ -23,6 +23,8 @@
             <input type="file" id="file-knowledge" accept=".txt,.md,.pdf" style="display:none">
             <button id="btn-vision" title="Bild analysieren (Frage ins Eingabefeld, dann Bild wählen)">📷</button>
             <input type="file" id="file-vision" accept="image/*" style="display:none">
+            <button id="btn-todo" title="To-do-Liste">✅</button>
+            <button id="btn-calendar" title="Kalender">📅</button>
             <button id="btn-profile" title="Profil &amp; Stimme">👤</button>
             <a href="/downloads" class="admin-link" title="Downloads">📦</a>
             <a href="/admin" class="admin-link" title="Administration">🛡</a>
@@ -47,6 +49,8 @@
         <div class="modal-box">
             <h2>Profil &amp; Stimme</h2>
             <p>Zuletzt erkannt: <b id="prof-current">niemand</b></p>
+            <button id="btn-open-calendar" class="secondary">📅 Mein Kalender</button>
+            <button id="btn-open-todo" class="secondary">✅ Meine To-do</button>
             <button id="btn-rec-voice">🎙 Stimmprofil aufnehmen (5 s)</button>
             <span id="prof-rec-status" class="hint"></span>
             <hr style="border-color:#243446;margin:16px 0">
@@ -62,8 +66,64 @@
         </div>
     </div>
 
+    <!-- Kalender -->
+    <div id="calendar" class="modal hidden">
+        <div class="modal-box cal-box">
+            <div class="cal-head">
+                <h2>📅 Kalender <span id="cal-user" class="muted" style="font-size:13px"></span></h2>
+                <div class="cal-nav">
+                    <button id="cal-prev" class="secondary small">‹</button>
+                    <span id="cal-month"></span>
+                    <button id="cal-next" class="secondary small">›</button>
+                </div>
+            </div>
+            <div id="cal-msg" class="hint"></div>
+            <div id="cal-grid" class="cal-grid"></div>
+            <div id="cal-day" class="cal-day"></div>
+            <details class="cal-ext">
+                <summary>Externe Kalender abonnieren &amp; iCal-Link</summary>
+                <div id="cal-subs" style="margin:8px 0"></div>
+                <div class="cal-row">
+                    <input id="cal-suburl" placeholder="iCal-URL (Google/Nextcloud/Arbeit)">
+                    <input id="cal-subname" placeholder="Name" style="max-width:130px">
+                    <button id="cal-subbtn" class="small">Abonnieren</button>
+                </div>
+                <p class="muted" style="font-size:11px;margin:10px 0 4px">Mein iCal-Abo-Link (nur im LAN):</p>
+                <div class="cal-row">
+                    <input id="cal-ical" readonly style="flex:1;font-size:11px">
+                    <button id="cal-icalcopy" class="small secondary">Kopieren</button>
+                </div>
+            </details>
+            <div class="modal-actions"><button id="cal-close" class="secondary">Schließen</button></div>
+        </div>
+    </div>
+
+    <!-- To-do -->
+    <div id="todo" class="modal hidden">
+        <div class="modal-box">
+            <h2>✅ To-do <span id="todo-user" class="muted" style="font-size:13px"></span></h2>
+            <div id="todo-msg" class="hint"></div>
+            <div class="cal-row" style="margin-bottom:10px">
+                <input id="todo-new" placeholder="Neuer Punkt…" style="flex:1">
+                <input id="todo-due" type="date" title="optional fällig (erscheint im Kalender)">
+                <button id="todo-add" class="small">+ Hinzufügen</button>
+            </div>
+            <div id="todo-list"></div>
+            <details class="cal-ext" style="margin-top:12px">
+                <summary>Hardlink (smartphone-optimiert, ohne Login)</summary>
+                <div class="cal-row" style="margin-top:8px">
+                    <input id="todo-link" readonly style="flex:1;font-size:11px">
+                    <button id="todo-linkcopy" class="small secondary">Kopieren</button>
+                </div>
+            </details>
+            <div class="modal-actions"><button id="todo-close" class="secondary">Schließen</button></div>
+        </div>
+    </div>
+
     <audio id="player"></audio>
     <script src="/static/hud.js"></script>
     <script src="/static/app.js"></script>
+    <script src="/static/calendar.js"></script>
+    <script src="/static/todo.js"></script>
 </body>
 </html>

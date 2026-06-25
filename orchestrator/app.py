@@ -17,6 +17,7 @@ import asyncio
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Cookie, Request
@@ -245,6 +246,9 @@ _TOOL_HINT = (
     "TERMINE/Kalender: add_event/list_events/update_event/delete_event; Kalender teilen mit share_calendar; "
     "Abo-Links über calendar_subscription. Einen EXTERNEN iCal-Kalender (Google/Nextcloud/Arbeit) bindet "
     "subscribe_calendar ein, damit du die Termine kennst. Zeiten als ISO 8601 lokal (Europe/Berlin) anhand des Datums oben. "
+    "TO-DO-LISTE: add_todo ('schreibe … auf meine To-do'; mit Datum due=YYYY-MM-DD erscheint der Punkt auch im Kalender), "
+    "list_todos ('was ist auf meiner To-do'), complete_todo ('… ist erledigt' — Punkt per Ähnlichkeit finden), "
+    "remove_todo, todo_link (Hardlink). "
     "Bei Fragen zu eigenen Dokumenten/Unterlagen knowledge_search nutzen. "
     "Bezieht sich die Frage auf etwas FRÜHER Besprochenes ('was hatten wir neulich zu…'), recall_conversation nutzen. "
     "Für wiederkehrende oder geplante Aufgaben, an die JARVIS SELBSTSTÄNDIG denken soll "
@@ -434,7 +438,8 @@ _SIDE_EFFECT_TOOLS = {"send_message", "client_action", "client_screenshot", "cre
                       "delete_skill", "create_automation", "create_watch_automation", "update_automation",
                       "cancel_automation", "set_timer", "cancel_timer", "save_memory", "save_note",
                       "add_event", "update_event", "delete_event", "share_calendar", "unshare_calendar",
-                      "subscribe_calendar", "unsubscribe_calendar"}
+                      "subscribe_calendar", "unsubscribe_calendar",
+                      "add_todo", "complete_todo", "remove_todo"}
 # Vollzugs-Behauptungen (deutsch, Perfekt/Partizip). Treffer ohne passenden Tool-Aufruf = verdächtig.
 _CLAIM_RE = re.compile(
     r"\b(gesendet|verschickt|geschickt|erledigt|ausgeführt|gestellt|eingerichtet|angelegt|erstellt|"
@@ -1021,6 +1026,186 @@ async def _deliver_automation(autom: dict, text: str, payload: dict | None) -> N
     if messaging.enabled() and autom.get("owner_user_id") is not None:
         await asyncio.to_thread(messaging.send_to_user, autom["owner_user_id"],
                                 f"🤖 {autom['title']}: {text}")
+
+
+# ── Nutzerseitige Kalender-API (Identität aus der Session/Stimme) ─────────────
+
+def _me_from_session(session_id: str | None) -> dict:
+    """Nutzer-Identität der Session (zuletzt per Stimme erkannt). Wirft 401, wenn unbekannt."""
+    ident = hub.get_identity(session_id) if session_id else None
+    if not ident or not ident.get("user_id"):
+        raise HTTPException(status_code=401, detail="Nicht erkannt — bitte erst sprechen, damit Jarvis weiß, wessen Kalender gemeint ist.")
+    return ident
+
+
+def _cal_parse_bound(s: str | None, default):
+    from datetime import date as _date
+    if not s:
+        return default
+    try:
+        ss = s.strip()
+        if len(ss) <= 10:
+            d = _date.fromisoformat(ss[:10])
+            return datetime(d.year, d.month, d.day, tzinfo=calendars.LOCAL).astimezone(timezone.utc)
+        return calendars.parse_dt(ss)
+    except Exception:
+        return default
+
+
+@app.get("/api/me/calendar")
+async def my_calendar(session_id: str, start: str | None = None, end: str | None = None):
+    """Alles für die Kalender-UI: Termine im Zeitraum, Kalenderliste, Abos, eigener iCal-Link."""
+    ident = _me_from_session(session_id)
+    uid = ident["user_id"]
+
+    def work():
+        now = datetime.now(timezone.utc)
+        s = _cal_parse_bound(start, now - timedelta(days=40))
+        e = _cal_parse_bound(end, now + timedelta(days=70))
+        cals = calendars.list_accessible(uid)
+        access = {c["id"]: c["access"] for c in cals}
+        is_admin = False
+        try:
+            is_admin = auth.is_admin(uid)
+        except Exception:
+            pass
+        out_events = []
+        for ev in calendars.list_events(uid, s, e):
+            can_edit = bool(is_admin or ev["created_by"] == uid or access.get(ev["calendar_id"]) == "owner")
+            out_events.append({
+                "id": ev["id"], "calendar": ev["calendar"], "calendar_id": ev["calendar_id"],
+                "title": ev["title"], "location": ev["location"], "all_day": ev["all_day"], "rrule": ev["rrule"],
+                "start": ev["start_ts"].astimezone(calendars.LOCAL).isoformat(),
+                "end": ev["end_ts"].astimezone(calendars.LOCAL).isoformat() if ev["end_ts"] else None,
+                "can_edit": can_edit,
+            })
+        base = (config.get().get("calendar_base_url") or "").rstrip("/")
+        writable = [{"id": c["id"], "name": c["name"], "kind": c["kind"], "access": c["access"]}
+                    for c in cals if c["access"] in ("write", "owner")]
+        return {
+            "username": ident.get("username"),
+            "events": out_events,
+            "calendars": [{"id": c["id"], "name": c["name"], "kind": c["kind"], "access": c["access"]} for c in cals],
+            "writable": writable,
+            "subscriptions": calendars.list_subscriptions(uid),
+            "ical_link": f"{base}/calendar/user/{calendars.user_token(uid)}.ics",
+        }
+    return await asyncio.to_thread(work)
+
+
+@app.post("/api/me/calendar/action")
+async def my_calendar_action(body: dict):
+    """Mutationen aus der UI (add/update/delete_event, subscribe/unsubscribe_calendar) —
+    nutzt dieselbe Dispatch-Logik samt Zugriffsprüfung wie der Agent."""
+    b = body or {}
+    ident = _me_from_session(b.get("session_id"))
+    name = b.get("action")
+    if name not in tools._CALENDAR_TOOLS:
+        raise HTTPException(status_code=400, detail="Unbekannte Aktion.")
+    ctx = {"cfg": config.get(), "user_id": ident["user_id"], "username": ident.get("username")}
+    msg = await asyncio.to_thread(tools._calendar_dispatch, name, b.get("args") or {}, ctx, ident["user_id"])
+    return {"message": msg}
+
+
+# ── To-do-Listen: nutzerseitig (Session) + Hardlink (Token, ohne Login) ───────
+import todos as _todos
+
+
+def _todo_json(t: dict) -> dict:
+    return {"id": t["id"], "text": t["text"], "done": t["done"], "due_date": t["due_date"]}
+
+
+@app.get("/api/me/todos")
+async def my_todos(session_id: str):
+    ident = _me_from_session(session_id)
+    uid = ident["user_id"]
+
+    def work():
+        base = (config.get().get("calendar_base_url") or "").rstrip("/")
+        return {"username": ident.get("username"),
+                "items": [_todo_json(t) for t in _todos.list_todos(uid, include_done=True)],
+                "link": f"{base}/todo/{_todos.share_token(uid)}"}
+    return await asyncio.to_thread(work)
+
+
+@app.post("/api/me/todos/add")
+async def my_todos_add(body: dict):
+    ident = _me_from_session((body or {}).get("session_id"))
+    text = ((body or {}).get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Kein Text.")
+    t = await asyncio.to_thread(_todos.add, ident["user_id"], text, (body.get("due") or "").strip() or None)
+    return {"item": _todo_json(t)}
+
+
+@app.post("/api/me/todos/toggle")
+async def my_todos_toggle(body: dict):
+    ident = _me_from_session((body or {}).get("session_id"))
+    tid = int((body or {}).get("id") or 0)
+    t = await asyncio.to_thread(_todos.get, tid)
+    if not t or t["user_id"] != ident["user_id"]:
+        raise HTTPException(status_code=404, detail="Punkt nicht gefunden.")
+    await asyncio.to_thread(_todos.set_done, tid, bool(body.get("done", True)))
+    return {"ok": True}
+
+
+@app.post("/api/me/todos/remove")
+async def my_todos_remove(body: dict):
+    ident = _me_from_session((body or {}).get("session_id"))
+    tid = int((body or {}).get("id") or 0)
+    t = await asyncio.to_thread(_todos.get, tid)
+    if not t or t["user_id"] != ident["user_id"]:
+        raise HTTPException(status_code=404, detail="Punkt nicht gefunden.")
+    await asyncio.to_thread(_todos.remove, tid)
+    return {"ok": True}
+
+
+# ── To-do Hardlink (Token im Pfad; ohne Login, LAN-gebunden über die Erreichbarkeit) ──
+def _todo_token_user(token: str) -> int:
+    uid = _todos.user_by_token(token)
+    if uid is None:
+        raise HTTPException(status_code=404, detail="Liste nicht gefunden.")
+    return uid
+
+
+@app.get("/api/todo/{token}")
+async def todo_public(token: str):
+    uid = await asyncio.to_thread(_todo_token_user, token)
+
+    def work():
+        name = None
+        try:
+            name = auth.username_by_id(uid)
+        except Exception:
+            pass
+        return {"username": name, "items": [_todo_json(t) for t in _todos.list_todos(uid, include_done=True)]}
+    return await asyncio.to_thread(work)
+
+
+@app.post("/api/todo/{token}/toggle")
+async def todo_public_toggle(token: str, body: dict):
+    uid = await asyncio.to_thread(_todo_token_user, token)
+    tid = int((body or {}).get("id") or 0)
+    t = await asyncio.to_thread(_todos.get, tid)
+    if not t or t["user_id"] != uid:
+        raise HTTPException(status_code=404, detail="Punkt nicht gefunden.")
+    await asyncio.to_thread(_todos.set_done, tid, bool(body.get("done", True)))
+    return {"ok": True}
+
+
+@app.post("/api/todo/{token}/add")
+async def todo_public_add(token: str, body: dict):
+    uid = await asyncio.to_thread(_todo_token_user, token)
+    text = ((body or {}).get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Kein Text.")
+    t = await asyncio.to_thread(_todos.add, uid, text, None)
+    return {"item": _todo_json(t)}
+
+
+@app.get("/todo/{token}")
+async def todo_page(token: str):
+    return FileResponse(str(Path(__file__).resolve().parent / "static" / "todo.html"))
 
 
 # ── Kalender: iCal-Abo-Feeds (nur LAN, token-gesichert) ───────────────────────
@@ -1750,6 +1935,23 @@ def admin_user_telegram(body: dict, jarvis_admin_token: str | None = Cookie(defa
     if chat:
         messaging.clear_pending(chat)                 # zugeordnet → nicht mehr „ausstehend"
     return {"ok": True}
+
+
+@app.post("/api/admin/users/obsidian")
+def admin_user_obsidian(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Obsidian-Vault-Pfad eines Nutzers setzen/entfernen (Schlüssel = Nutzername in Kleinschreibung)."""
+    _admin(jarvis_admin_token)
+    username = str((body or {}).get("username", "")).strip().lower()
+    path = str((body or {}).get("path", "")).strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Kein Nutzername.")
+    vaults = dict(config.get().get("obsidian_vaults") or {})
+    if path:
+        vaults[username] = path
+    else:
+        vaults.pop(username, None)
+    config.update({"obsidian_vaults": vaults})
+    return {"ok": True, "vaults": vaults}
 
 
 @app.get("/api/admin/messaging/pending")
