@@ -47,8 +47,23 @@
     <!-- Profil & Stimme (Selbstbedienung) -->
     <div id="profile" class="modal hidden">
         <div class="modal-box">
-            <h2>Profil &amp; Stimme</h2>
-            <p>Zuletzt erkannt: <b id="prof-current">niemand</b></p>
+            <h2>Profil &amp; Anmeldung</h2>
+            <p>Aktuell: <b id="prof-current">niemand</b></p>
+
+            <div id="login-box">
+                <p class="muted" style="font-size:12px">Anmelden (möglich, sobald ein Admin ein Passwort vergeben hat) —
+                   danach stehen Kalender &amp; To-do ohne Stimmerkennung bereit.</p>
+                <label>Nutzer <input id="ui-user" autocomplete="username"></label>
+                <label>Passwort <input id="ui-pass" type="password" autocomplete="current-password"></label>
+                <button id="btn-ui-login">Anmelden</button>
+                <span id="ui-login-status" class="hint"></span>
+            </div>
+            <div id="logged-box" class="hidden">
+                <p>✅ Angemeldet als <b id="ui-whoami"></b>
+                   <button id="btn-ui-logout" class="secondary">Abmelden</button></p>
+            </div>
+
+            <hr style="border-color:#243446;margin:14px 0">
             <button id="btn-open-calendar" class="secondary">📅 Mein Kalender</button>
             <button id="btn-open-todo" class="secondary">✅ Meine To-do</button>
             <button id="btn-rec-voice">🎙 Stimmprofil aufnehmen (5 s)</button>

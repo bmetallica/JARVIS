@@ -156,6 +156,25 @@ def profile_all() -> list[dict]:
     return [{"user_id": r[0], "content": r[1], "updated_at": str(r[2])} for r in rows]
 
 
+def profile_age_seconds(user_id: int):
+    """Sekunden seit der letzten Profil-Aktualisierung, oder None wenn noch keins existiert."""
+    _profile_init()
+    with _conn() as c:
+        row = c.execute("SELECT EXTRACT(EPOCH FROM (now() - updated_at)) FROM user_profile WHERE user_id=%s;",
+                        (user_id,)).fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def history_for_user(user_id: int, limit: int = 16) -> list[dict]:
+    """Letzte Nachrichten eines Nutzers (über alle Sessions) — für Profil-Generierung."""
+    _history_init()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT role, content FROM chat_history WHERE user_key=%s ORDER BY id DESC LIMIT %s;",
+            (str(user_id), limit)).fetchall()
+    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+
 def history_trim(session_id: str, keep: int = 200) -> None:
     """Alte Zeilen kappen, damit die Tabelle nicht unbegrenzt wächst (behält die neuesten `keep`)."""
     _history_init()

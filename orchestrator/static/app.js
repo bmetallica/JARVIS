@@ -273,10 +273,41 @@ let lastSpeaker = null;     // zuletzt per Stimme erkannte Person
 const profileEl = document.getElementById("profile");
 
 function openProfile() {
-    document.getElementById("prof-current").textContent = lastSpeaker ? lastSpeaker.username : "niemand";
     document.getElementById("prof-rec-status").textContent = "";
     document.getElementById("prof-create-status").textContent = "";
     profileEl.classList.remove("hidden");
+    refreshMe();
+}
+
+// ── Anmeldung im normalen UI (optional, statt Stimmverifikation) ──────────────
+let authedUser = null;
+async function refreshMe() {
+    let me = {};
+    try { me = await (await fetch(`/api/me?session_id=${encodeURIComponent(sessionId || "")}`)).json(); } catch { /* ignore */ }
+    authedUser = me.authed ? me.username : null;
+    const who = me.username || (lastSpeaker ? lastSpeaker.username : null);
+    document.getElementById("prof-current").textContent = who ? who + (me.authed ? " (angemeldet)" : " (Stimme)") : "niemand";
+    document.getElementById("login-box").classList.toggle("hidden", !!authedUser);
+    document.getElementById("logged-box").classList.toggle("hidden", !authedUser);
+    if (authedUser) document.getElementById("ui-whoami").textContent = authedUser;
+}
+async function uiLogin() {
+    const st = document.getElementById("ui-login-status");
+    st.className = "hint"; st.textContent = "…";
+    try {
+        const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, username: document.getElementById("ui-user").value.trim(),
+                password: document.getElementById("ui-pass").value }) });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+        document.getElementById("ui-pass").value = "";
+        st.textContent = "";
+        await refreshMe();
+    } catch (e) { st.className = "hint error"; st.textContent = e.message; }
+}
+async function uiLogout() {
+    try { await fetch("/api/logout", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }) }); } catch { /* ignore */ }
+    await refreshMe();
 }
 
 async function recordVoiceProfile() {
@@ -328,6 +359,9 @@ document.getElementById("btn-profile").addEventListener("click", openProfile);
 document.getElementById("btn-rec-voice").addEventListener("click", recordVoiceProfile);
 document.getElementById("btn-create-user").addEventListener("click", createUserBasic);
 document.getElementById("btn-prof-close").addEventListener("click", () => profileEl.classList.add("hidden"));
+document.getElementById("btn-ui-login").addEventListener("click", uiLogin);
+document.getElementById("btn-ui-logout").addEventListener("click", uiLogout);
+document.getElementById("ui-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") uiLogin(); });
 
 // Wissensbasis-Upload
 const fileKnow = document.getElementById("file-knowledge");

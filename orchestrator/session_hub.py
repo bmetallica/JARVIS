@@ -33,6 +33,7 @@ class SessionHub:
         self._last_tools: dict = {}  # session_id -> [{name, result}]  (letzte Tool-Ergebnisse für Rückfragen)
         self._summary: dict = {}     # session_id -> rollierende Zusammenfassung getrimmter alter Turns
         self._cancel: dict = {}      # session_id -> True, wenn laufender Turn abgebrochen werden soll (Barge-in)
+        self._authed: dict = {}      # session_id -> identity (explizite Passwort-Anmeldung, Vorrang vor Stimme)
 
     def mark_dev(self, session_id: str | None) -> None:
         """Session ist in einem Entwicklungs-/Bau-Flow (Skill/Code/Browser-Automation)."""
@@ -57,6 +58,17 @@ class SessionHub:
         else:
             self._onboard[session_id] = state
 
+    # ── Explizite Anmeldung (Passwort) — hat Vorrang vor der Stimm-Identität ──
+    def set_authed(self, session_id: str, identity: dict) -> None:
+        if session_id and identity:
+            self._authed[session_id] = identity
+
+    def clear_authed(self, session_id: str) -> None:
+        self._authed.pop(session_id, None)
+
+    def is_authed(self, session_id: str | None) -> bool:
+        return bool(session_id) and session_id in self._authed
+
     def set_identity(self, session_id: str, identity: dict | None) -> None:
         if identity:
             self._identity[session_id] = identity
@@ -64,7 +76,9 @@ class SessionHub:
             self._identity.pop(session_id, None)
 
     def get_identity(self, session_id: str | None) -> dict | None:
-        return self._identity.get(session_id) if session_id else None
+        if not session_id:
+            return None
+        return self._authed.get(session_id) or self._identity.get(session_id)
 
     # ── Verlauf pro Session (vom Server geführt, NICHT vom Client) ──────────────
     def history(self, session_id: str, limit: int = 20) -> list[dict]:
@@ -89,7 +103,8 @@ class SessionHub:
         # Write-Through in die DB (best-effort — bei DB-Ausfall läuft der Chat im RAM weiter).
         try:
             import store
-            store.history_append(session_id, role, content)
+            uid = (self._identity.get(session_id) or {}).get("user_id")
+            store.history_append(session_id, role, content, user_key=str(uid) if uid is not None else None)
         except Exception:
             pass
 

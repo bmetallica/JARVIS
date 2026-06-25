@@ -142,9 +142,15 @@ def admin_calendars(jarvis_admin_token: str | None = Cookie(default=None)):
 
 @app.get("/api/admin/user-profiles")
 def user_profiles_get(jarvis_admin_token: str | None = Cookie(default=None)):
-    """Nutzermodelle (Phase 3) ansehen."""
+    """Nutzermodelle (Phase 3) ansehen — ALLE Nutzer, jeweils mit (evtl. noch leerem) Profil."""
     _admin(jarvis_admin_token)
-    return {"profiles": store.profile_all()}
+    profs = {p["user_id"]: p for p in store.profile_all()}
+    out = []
+    for u in auth.list_users():
+        p = profs.get(u["id"], {})
+        out.append({"user_id": u["id"], "username": u["username"],
+                    "content": p.get("content", ""), "updated_at": p.get("updated_at")})
+    return {"profiles": out}
 
 
 @app.post("/api/admin/user-profile")
@@ -154,6 +160,28 @@ def user_profile_set(body: dict, jarvis_admin_token: str | None = Cookie(default
     b = body or {}
     store.profile_set(int(b.get("user_id")), (b.get("content") or "").strip())
     return {"ok": True}
+
+
+@app.post("/api/admin/user-profile/generate")
+async def user_profile_generate(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Profil aus dem vorhandenen Gesprächsverlauf des Nutzers (neu) generieren."""
+    _admin(jarvis_admin_token)
+    uid = int((body or {}).get("user_id") or 0)
+
+    def work():
+        tail = store.history_for_user(uid, 16)
+        if not tail:                                   # Fallback: Telegram-Session des Nutzers
+            try:
+                cid = auth.telegram_chat_for_user(uid)
+                if cid:
+                    tail = store.history_load(f"tg{cid}", 16)
+            except Exception:
+                pass
+        if not tail:
+            return {"ok": False, "message": "Kein Gesprächsverlauf für diesen Nutzer gefunden."}
+        user_profile.update_from_history(config.get(), uid, tail)
+        return {"ok": True, "content": store.profile_get(uid)}
+    return await asyncio.to_thread(work)
 
 
 # ── Selbstbedienung im normalen UI (kein Admin nötig) ─────────────────────────
@@ -464,24 +492,21 @@ def _index_conversation_bg(ctx: dict, final: str) -> None:
     threading.Thread(target=_work, daemon=True).start()
 
 
-_profile_counter: dict = {}
-
-
 def _update_profile_bg(ctx: dict) -> None:
-    """Nutzermodell (Phase 3) alle N Turns im Hintergrund aus dem jüngsten Verlauf aktualisieren."""
+    """Nutzermodell (Phase 3) im Hintergrund aktualisieren — ZEITBASIERT gedrosselt (überlebt Neustarts):
+    höchstens alle `profile_min_interval_s` Sekunden je Nutzer, sonst übersprungen."""
     cfg = ctx.get("cfg") or config.get()
     uid = ctx.get("user_id")
     if not uid or not cfg.get("profile_enabled", True):
         return
-    every = max(1, int(cfg.get("profile_update_every", 6)))
-    n = _profile_counter.get(uid, 0) + 1
-    _profile_counter[uid] = n
-    if n % every != 0:
-        return
-    tail = hub.history(ctx.get("session_id"))[-8:]
+    interval = int(cfg.get("profile_min_interval_s", 180))
 
     def _work():
         try:
+            age = store.profile_age_seconds(uid)          # None = noch kein Profil → sofort anlegen
+            if age is not None and age < interval:
+                return
+            tail = hub.history(ctx.get("session_id"))[-8:]
             user_profile.update_from_history(cfg, uid, tail)
         except Exception:
             pass
@@ -586,6 +611,34 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
 async def chat(req: ChatRequest):
     content, identity = await _run_chat(req, channel="chat")
     return {"reply": content, "speaker": identity}
+
+
+# ── Nutzer-Login im normalen UI (optional, statt Stimmverifikation) ────────────
+@app.post("/api/login")
+async def user_login(body: dict):
+    """Meldet einen Nutzer per Passwort an dieser Browser-Session an (nur Nutzer MIT Passwort).
+    Danach gilt die Identität für diese Session (Vorrang vor der Stimme) → alle Funktionen verfügbar."""
+    b = body or {}
+    sess = await asyncio.to_thread(auth.login, (b.get("username") or "").strip(), b.get("password") or "")
+    if not sess:
+        raise HTTPException(status_code=401,
+                            detail="Anmeldung fehlgeschlagen (falsche Daten oder für diesen Nutzer ist kein Passwort gesetzt).")
+    sid = b.get("session_id") or "anon"
+    hub.set_authed(sid, {"user_id": sess["user_id"], "username": sess["username"], "confidence": 1.0})
+    hub.set_last_user(sid, sess["user_id"])
+    return {"ok": True, "username": sess["username"], "is_admin": sess.get("is_admin", False)}
+
+
+@app.post("/api/logout")
+async def user_logout(body: dict):
+    hub.clear_authed((body or {}).get("session_id") or "anon")
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def user_me(session_id: str):
+    ident = hub.get_identity(session_id)
+    return {"username": (ident or {}).get("username"), "authed": hub.is_authed(session_id)}
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -844,7 +897,8 @@ async def _satellite_turn(ws: WebSocket, sid: str, pcm: bytes) -> None:
         hub.set_last_voice(sid, emb)
     except Exception:
         spk = None
-    hub.set_identity(sid, spk)
+    if not hub.is_authed(sid):                 # angemeldete Session: Stimme überschreibt die Anmeldung nicht
+        hub.set_identity(sid, spk)
     if spk:
         asyncio.create_task(automations.manager.dispatch_event(
             "speaker_recognized",
@@ -2168,7 +2222,7 @@ async def stt(file: UploadFile = File(...), session_id: str = Form(default="")):
             hub.set_last_voice(session_id, emb)
     except Exception as e:
         print(f"[stt] Sprecher-Erkennung übersprungen: {e}")
-    if session_id:
+    if session_id and not hub.is_authed(session_id):
         hub.set_identity(session_id, speaker)
     if speaker and session_id:
         asyncio.create_task(automations.manager.dispatch_event(

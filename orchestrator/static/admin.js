@@ -135,17 +135,29 @@ async function loadProfiles() {
     let data;
     try { data = await api("GET", "/api/admin/user-profiles"); } catch { return; }
     const el = $("profiles"); el.innerHTML = "";
-    if (!data.profiles.length) { el.innerHTML = '<p class="muted">Noch keine Profile — entstehen automatisch im Gespräch.</p>'; return; }
+    if (!data.profiles.length) { el.innerHTML = '<p class="muted">Keine Nutzer vorhanden.</p>'; return; }
     for (const p of data.profiles) {
         const div = document.createElement("div"); div.className = "item";
-        div.innerHTML = `<div class="head"><span class="name">Nutzer #${p.user_id}</span>
-            <span class="muted" style="font-size:11px">aktualisiert ${escHtml(String(p.updated_at).slice(0, 16))}</span></div>
-            <textarea data-prof="${p.user_id}" rows="5" style="width:100%;font-size:12px;margin-top:6px">${escHtml(p.content)}</textarea>
-            <div class="row" style="margin-top:4px"><button class="small" data-psave="${p.user_id}">Speichern</button>
+        const when = p.updated_at ? "aktualisiert " + escHtml(String(p.updated_at).slice(0, 16)) : "noch kein Profil";
+        div.innerHTML = `<div class="head"><span class="name">${escHtml(p.username)} <span class="muted" style="font-size:11px">#${p.user_id}</span></span>
+            <span class="muted" style="font-size:11px">${when}</span></div>
+            <textarea data-prof="${p.user_id}" rows="5" style="width:100%;font-size:12px;margin-top:6px" placeholder="(leer — per Gespräch oder „Generieren“ füllen)">${escHtml(p.content)}</textarea>
+            <div class="row" style="margin-top:4px"><button class="small" data-pgen="${p.user_id}">⟳ Aus Verlauf generieren</button>
+            <button class="small" data-psave="${p.user_id}">Speichern</button>
             <button class="small danger" data-pclear="${p.user_id}">Leeren</button>
             <span class="muted" data-pstatus="${p.user_id}" style="font-size:11px"></span></div>`;
         el.appendChild(div);
     }
+    el.querySelectorAll("[data-pgen]").forEach((b) => b.onclick = async () => {
+        const uid = b.dataset.pgen, st = el.querySelector(`[data-pstatus="${uid}"]`);
+        b.disabled = true; st.textContent = "generiere…";
+        try {
+            const r = await api("POST", "/api/admin/user-profile/generate", { user_id: +uid });
+            if (r.ok) { st.textContent = "✓ generiert"; await loadProfiles(); }
+            else st.textContent = r.message || "kein Verlauf";
+        } catch (e) { st.textContent = "Fehler: " + e.message; }
+        b.disabled = false;
+    });
     const save = async (uid, content) => {
         const st = el.querySelector(`[data-pstatus="${uid}"]`);
         try { await api("POST", "/api/admin/user-profile", { user_id: +uid, content }); st.textContent = "✓ gespeichert"; }

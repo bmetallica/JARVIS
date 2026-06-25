@@ -73,7 +73,7 @@ _DEFAULTS: dict = {
 
     # ── Agent-kuratiertes Nutzermodell (Phase 3) ─────────────────────────────────
     "profile_enabled": True,         # rollierendes Nutzerprofil pflegen + in den Prompt einblenden
-    "profile_update_every": 6,       # alle N Turns das Profil aus dem jüngsten Verlauf aktualisieren
+    "profile_min_interval_s": 180,   # Profil je Nutzer höchstens alle N Sekunden neu generieren (restart-robust)
 
     # ── Kalender ─────────────────────────────────────────────────────────────────
     "calendar_enabled": True,
