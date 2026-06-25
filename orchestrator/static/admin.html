@@ -45,6 +45,9 @@
         <section id="view-admin" class="hidden">
             <nav class="adminnav">
                 <button class="navbtn active" data-tab="system">⚙ System</button>
+                <button class="navbtn" data-tab="models">🧠 Modelle</button>
+                <button class="navbtn" data-tab="profiles">📇 Profile</button>
+                <button class="navbtn" data-tab="integrations">🔗 Integrationen</button>
                 <button class="navbtn" data-tab="users">👤 Nutzer</button>
                 <button class="navbtn" data-tab="groups">🛡 Gruppen &amp; Rechte</button>
                 <button class="navbtn" data-tab="mcp">🔌 MCP-Server</button>
@@ -53,6 +56,52 @@
                 <button class="navbtn" data-tab="skills">🧰 Skills</button>
                 <button class="navbtn" data-tab="debug">🐞 Debug</button>
             </nav>
+
+            <div class="card tab hidden" data-tab="models">
+                <h2>Modelle 🧠</h2>
+                <p class="muted" style="font-size:12px">Weise jeder Rolle ein Modell zu und gib die Slot-Zahl an.
+                   <b>Effektiver Kontext = ctx_total ÷ Slots</b> (llama-swap <code>--parallel</code> teilt den Kontext).
+                   Beim Speichern werden <code>llm_model</code>, <code>vision_model</code> und das Token-Budget
+                   (<code>llm_ctx</code>) automatisch gesetzt. Hinweis: Das tatsächliche <code>--parallel</code> auf dem
+                   GPU-Server muss dort separat passen — hier wird der bekannte Wert zur Budgetierung hinterlegt.</p>
+                <div class="row"><button id="btn-models-refresh" class="small">↻ Aktualisieren</button></div>
+                <div id="model-registry" style="margin-top:10px"></div>
+                <div class="row" style="margin-top:10px"><button id="btn-models-save">Speichern</button>
+                    <span id="models-status" class="muted"></span></div>
+            </div>
+
+            <div class="card tab hidden" data-tab="integrations">
+                <h2>Integrationen 🔗</h2>
+
+                <fieldset><legend>Obsidian-Notizen</legend>
+                    <p class="muted" style="font-size:12px">„Notiz: …“ landet in der Obsidian-Vault des Nutzers.
+                       Zuordnung: JARVIS-Nutzername (klein) → absoluter Vault-Pfad auf dem Host.</p>
+                    <label class="inline"><input type="checkbox" id="obs-enabled"> aktiviert</label>
+                    <label>Inbox-Datei (relativ zur Vault) <input id="obs-inbox" placeholder="Inbox.md" style="width:160px"></label>
+                    <div id="obs-vaults" style="margin-top:8px"></div>
+                    <div class="row" style="margin-top:6px"><button id="btn-obs-addrow" class="small secondary">+ Zuordnung</button>
+                        <button id="btn-obs-save">Speichern</button><span id="obs-status" class="muted"></span></div>
+                </fieldset>
+
+                <fieldset style="margin-top:14px"><legend>Kalender</legend>
+                    <p class="muted" style="font-size:12px">Pro Nutzer ein Kalender + ein gemeinsamer; iCal-Abo nur im LAN.
+                       JARVIS verwaltet Termine per Sprache/Chat (add_event/list_events/…).</p>
+                    <label class="inline"><input type="checkbox" id="cal-enabled"> aktiviert</label>
+                    <label>Basis-URL (für Abo-Links) <input id="cal-baseurl" style="width:280px"></label>
+                    <div class="row" style="margin-top:6px"><button id="btn-cal-save">Speichern</button>
+                        <button id="btn-cal-list" class="small secondary">↻ Kalender-Übersicht</button>
+                        <span id="cal-status" class="muted"></span></div>
+                    <div id="cal-list" style="margin-top:10px"></div>
+                </fieldset>
+            </div>
+
+            <div class="card tab hidden" data-tab="profiles">
+                <h2>Nutzermodelle 📇</h2>
+                <p class="muted" style="font-size:12px">Fortgeschriebene Profile je Nutzer (Phase 3) — JARVIS pflegt sie
+                   automatisch aus den Gesprächen. Hier ansehen, editieren oder leeren.</p>
+                <div class="row"><button id="btn-profiles-refresh" class="small">↻ Aktualisieren</button></div>
+                <div id="profiles" style="margin-top:10px"></div>
+            </div>
 
             <div class="card tab hidden" data-tab="autonomy">
                 <h2>Autonomie — Automatisierungen</h2>
@@ -165,6 +214,7 @@
                         <label>Timeout (s) <input id="cfg-llm_timeout" type="number"></label>
                         <label>Frequency-Penalty (gegen Schleifen, 0–0.6) <input id="cfg-llm_frequency_penalty" type="number" step="0.1"></label>
                     </div>
+                    <label class="inline"><input id="cfg-llm_cache_prompt" type="checkbox"> Prompt-Caching (KV-Cache des System-Prompts wiederverwenden – schnellerer Prefill)</label>
                     <label>Denkmodus (gemma4-Reasoning)
                         <select id="cfg-thinking_mode">
                             <option value="adaptive">adaptiv – erst schnell ohne Denken, bei Bedarf mit (empfohlen)</option>

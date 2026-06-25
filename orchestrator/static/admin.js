@@ -64,7 +64,7 @@ const CFG_KEYS = ["llm_url", "llm_model", "vision_model", "llm_max_tokens", "llm
     "thinking_mode", "thinking_budget", "stt_url", "stt_model",
     "stt_language", "tts_engine", "tts_voice_edge", "tts_voice_piper", "tts_voice_kokoro", "tts_url",
     "voice_id_threshold", "system_prompt", "sandbox_url", "sandbox_timeout_s"];
-const CFG_BOOLS = ["sandbox_enabled", "sandbox_allow_network", "fetch_allow_lan"];
+const CFG_BOOLS = ["sandbox_enabled", "sandbox_allow_network", "fetch_allow_lan", "llm_cache_prompt"];
 
 async function loadAdmin() {
     RES = await api("GET", "/api/admin/resources");
@@ -78,7 +78,146 @@ async function loadAdmin() {
     await loadAutomations();
     await loadAutonomy();
     await loadSkills();
+    await loadModels();
+    await loadProfiles();
+    await loadIntegrations();
 }
+
+// ── Modell-Registry (Phase 0) ───────────────────────────────────────────────
+const MODEL_ROLES = [["agent", "Agent (Tool-Loop)"], ["vision", "Vision"], ["subagent", "Subagent"]];
+async function loadModels() {
+    let data;
+    try { data = await api("GET", "/api/admin/model-registry"); } catch { return; }
+    const avail = data.available || [], byRole = {};
+    for (const m of (data.registry || [])) byRole[m.role] = m;
+    const el = $("model-registry"); el.innerHTML = "";
+    for (const [role, label] of MODEL_ROLES) {
+        const m = byRole[role] || {};
+        const opts = ['<option value="">— (Standard) —</option>'].concat(
+            avail.map((id) => `<option value="${id}" ${id === m.id ? "selected" : ""}>${id}</option>`)).join("");
+        const ct = m.ctx_total || 32768, sl = m.slots || 1, eff = Math.max(512, Math.floor(ct / Math.max(1, sl)));
+        const row = document.createElement("div");
+        row.className = "row"; row.style.cssText = "align-items:center;gap:8px;margin-bottom:6px";
+        row.innerHTML = `<b style="width:120px">${label}</b>
+            <select data-mrole="${role}" data-f="id" style="min-width:160px">${opts}</select>
+            <label>ctx_total <input type="number" data-mrole="${role}" data-f="ctx_total" value="${ct}" style="width:90px"></label>
+            <label>Slots <input type="number" min="1" data-mrole="${role}" data-f="slots" value="${sl}" style="width:60px"></label>
+            <span class="muted" data-eff="${role}">→ effektiv ${eff} Tokens</span>`;
+        el.appendChild(row);
+    }
+    el.querySelectorAll("input[data-f]").forEach((inp) => inp.oninput = () => {
+        const role = inp.dataset.mrole;
+        const ct = +el.querySelector(`[data-mrole="${role}"][data-f="ctx_total"]`).value || 0;
+        const sl = +el.querySelector(`[data-mrole="${role}"][data-f="slots"]`).value || 1;
+        el.querySelector(`[data-eff="${role}"]`).textContent = `→ effektiv ${Math.max(512, Math.floor(ct / Math.max(1, sl)))} Tokens`;
+    });
+}
+$("btn-models-refresh").onclick = loadModels;
+$("btn-models-save").onclick = async () => {
+    const el = $("model-registry"), models = [];
+    for (const [role] of MODEL_ROLES) {
+        const id = el.querySelector(`select[data-mrole="${role}"]`).value;
+        if (!id) continue;
+        models.push({
+            id, role,
+            ctx_total: +el.querySelector(`[data-mrole="${role}"][data-f="ctx_total"]`).value || 32768,
+            slots: +el.querySelector(`[data-mrole="${role}"][data-f="slots"]`).value || 1,
+        });
+    }
+    try {
+        const r = await api("POST", "/api/admin/model-registry", { models });
+        $("models-status").textContent = `✓ gespeichert · Agent: ${r.llm_model} (ctx ${r.llm_ctx}), Vision: ${r.vision_model}`;
+    } catch (e) { $("models-status").textContent = "Fehler: " + e.message; }
+};
+
+// ── Nutzermodelle / Profile (Phase 3) ───────────────────────────────────────
+async function loadProfiles() {
+    let data;
+    try { data = await api("GET", "/api/admin/user-profiles"); } catch { return; }
+    const el = $("profiles"); el.innerHTML = "";
+    if (!data.profiles.length) { el.innerHTML = '<p class="muted">Noch keine Profile — entstehen automatisch im Gespräch.</p>'; return; }
+    for (const p of data.profiles) {
+        const div = document.createElement("div"); div.className = "item";
+        div.innerHTML = `<div class="head"><span class="name">Nutzer #${p.user_id}</span>
+            <span class="muted" style="font-size:11px">aktualisiert ${escHtml(String(p.updated_at).slice(0, 16))}</span></div>
+            <textarea data-prof="${p.user_id}" rows="5" style="width:100%;font-size:12px;margin-top:6px">${escHtml(p.content)}</textarea>
+            <div class="row" style="margin-top:4px"><button class="small" data-psave="${p.user_id}">Speichern</button>
+            <button class="small danger" data-pclear="${p.user_id}">Leeren</button>
+            <span class="muted" data-pstatus="${p.user_id}" style="font-size:11px"></span></div>`;
+        el.appendChild(div);
+    }
+    const save = async (uid, content) => {
+        const st = el.querySelector(`[data-pstatus="${uid}"]`);
+        try { await api("POST", "/api/admin/user-profile", { user_id: +uid, content }); st.textContent = "✓ gespeichert"; }
+        catch (e) { st.textContent = "Fehler: " + e.message; }
+    };
+    el.querySelectorAll("[data-psave]").forEach((b) => b.onclick = () =>
+        save(b.dataset.psave, el.querySelector(`[data-prof="${b.dataset.psave}"]`).value));
+    el.querySelectorAll("[data-pclear]").forEach((b) => b.onclick = async () => {
+        if (!confirm("Profil leeren?")) return;
+        el.querySelector(`[data-prof="${b.dataset.pclear}"]`).value = "";
+        await save(b.dataset.pclear, ""); await loadProfiles();
+    });
+}
+$("btn-profiles-refresh").onclick = loadProfiles;
+
+// ── Integrationen (Obsidian + Kalender) ─────────────────────────────────────
+const escAttr = (s) => (s || "").replace(/"/g, "&quot;");
+async function loadIntegrations() {
+    let cfg;
+    try { cfg = await api("GET", "/api/config"); } catch { return; }
+    $("obs-enabled").checked = !!cfg.obsidian_enabled;
+    $("obs-inbox").value = cfg.obsidian_inbox || "Inbox.md";
+    renderVaultRows(cfg.obsidian_vaults || {});
+    $("cal-enabled").checked = !!cfg.calendar_enabled;
+    $("cal-baseurl").value = cfg.calendar_base_url || "";
+}
+function addVaultRow(u = "", p = "") {
+    const el = $("obs-vaults");
+    const row = document.createElement("div");
+    row.className = "row"; row.style.cssText = "gap:6px;margin-bottom:4px";
+    row.innerHTML = `<input class="ov-user" placeholder="nutzername" value="${escAttr(u)}" style="width:140px">
+        <input class="ov-path" placeholder="/opt/obsidian/config/Vault" value="${escAttr(p)}" style="flex:1">
+        <button class="small danger ov-del">✕</button>`;
+    row.querySelector(".ov-del").onclick = () => row.remove();
+    el.appendChild(row);
+}
+function renderVaultRows(map) {
+    $("obs-vaults").innerHTML = "";
+    const entries = Object.entries(map || {});
+    if (!entries.length) entries.push(["", ""]);
+    for (const [u, p] of entries) addVaultRow(u, p);
+}
+$("btn-obs-addrow").onclick = () => addVaultRow();
+$("btn-obs-save").onclick = async () => {
+    const map = {};
+    document.querySelectorAll("#obs-vaults .row").forEach((r) => {
+        const u = r.querySelector(".ov-user").value.trim().toLowerCase();
+        const p = r.querySelector(".ov-path").value.trim();
+        if (u && p) map[u] = p;
+    });
+    try {
+        await api("POST", "/api/config", { obsidian_enabled: $("obs-enabled").checked,
+            obsidian_inbox: $("obs-inbox").value.trim() || "Inbox.md", obsidian_vaults: map });
+        $("obs-status").textContent = "✓ gespeichert";
+    } catch (e) { $("obs-status").textContent = "Fehler: " + e.message; }
+};
+$("btn-cal-save").onclick = async () => {
+    try {
+        await api("POST", "/api/config", { calendar_enabled: $("cal-enabled").checked,
+            calendar_base_url: $("cal-baseurl").value.trim() });
+        $("cal-status").textContent = "✓ gespeichert";
+    } catch (e) { $("cal-status").textContent = "Fehler: " + e.message; }
+};
+$("btn-cal-list").onclick = async () => {
+    const el = $("cal-list"); el.innerHTML = "lädt…";
+    try {
+        const d = await api("GET", "/api/admin/calendars");
+        el.innerHTML = d.calendars.map((c) => `<div class="item"><b>${escHtml(c.name)}</b>
+            <span class="muted">(${c.kind}${c.owner ? ", " + escHtml(c.owner) : ""}, ${c.events} Termine)</span><br>
+            <code style="font-size:11px">${escHtml(c.ics)}</code></div>`).join("") || '<p class="muted">Keine Kalender.</p>';
+    } catch (e) { el.textContent = "Fehler: " + e.message; }
+};
 
 // ── MCP-Server ────────────────────────────────────────────────────────────────
 async function loadMcp() {
@@ -347,14 +486,19 @@ async function loadSkills() {
             : '<span class="tag" style="background:#33404d;color:#9fb3c8">🔒 Sandbox</span>';
         const fail = s.fail_count ? ` · <span style="color:var(--bad)">Fehler: ${s.fail_count}</span>` : "";
         const elev = s.trust === "elevated";
-        div.innerHTML = `<div class="head"><span class="name">${s.name} ${on} ${net} ${trust}</span>
+        const unhealthy = (s.fail_count || 0) >= 3 && s.last_error;
+        const unhealthyTag = unhealthy ? ' <span class="tag" style="background:#5a4a2a;color:#ffd9a0">⚠ instabil</span>' : "";
+        const repairBtn = s.last_error ? `<button class="small" data-srepair="${s.name}" title="Code automatisch reparieren">🔧 Reparieren</button>` : "";
+        const errLine = s.last_error ? `<div class="muted" style="font-size:11px;color:var(--bad);margin-top:2px">letzter Fehler: ${escHtml(String(s.last_error))}</div>` : "";
+        div.innerHTML = `<div class="head"><span class="name">${s.name} ${on} ${net} ${trust}${unhealthyTag}</span>
             <span><button class="small" data-srun="${s.name}">▶ Test</button>
+            ${repairBtn}
             <button class="small secondary" data-stog="${s.name}">${s.enabled ? "Deaktivieren" : "Aktivieren"}</button>
             <button class="small secondary" data-ssave="${s.name}">💾 Code speichern</button>
             <button class="small danger" data-sdel="${s.name}">Löschen</button></span></div>
             <div class="muted" style="font-size:12px">${escHtml(s.description)} · v${s.version} · Läufe: ${s.run_count}${fail}${
               ((s.apt && s.apt.length) || (s.pip && s.pip.length))
-                ? " · Pakete: " + [...(s.apt || []).map((x) => "apt:" + x), ...(s.pip || []).map((x) => "pip:" + x)].join(", ") : ""}</div>
+                ? " · Pakete: " + [...(s.apt || []).map((x) => "apt:" + x), ...(s.pip || []).map((x) => "pip:" + x)].join(", ") : ""}</div>${errLine}
             <textarea data-scode="${s.name}" rows="6" style="width:100%;font-family:monospace;font-size:11px;margin-top:6px">${escHtml(s.code)}</textarea>
             <div class="row" style="margin-top:4px;align-items:center">
               <label class="inline" style="font-size:11px"><input type="checkbox" data-snet="${s.name}" ${s.net ? "checked" : ""}> Netz erlaubt</label>
@@ -378,6 +522,12 @@ async function loadSkills() {
     });
     el.querySelectorAll("[data-sdel]").forEach((b) => b.onclick = async () => {
         if (confirm("Skill löschen?")) { await api("POST", "/api/admin/skills/delete", { name: b.dataset.sdel }); await loadSkills(); }
+    });
+    el.querySelectorAll("[data-srepair]").forEach((b) => b.onclick = async () => {
+        b.disabled = true; b.textContent = "🔧 repariere…";
+        try { const r = await api("POST", "/api/admin/skills/repair", { name: b.dataset.srepair }); alert(r.message); }
+        catch (e) { alert("Fehler: " + e.message); }
+        await loadSkills();
     });
     el.querySelectorAll("[data-ssave]").forEach((b) => b.onclick = async () => {
         const name = b.dataset.ssave;

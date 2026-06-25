@@ -139,6 +139,42 @@ def get_updates(offset: int, timeout: int = 25) -> list[dict]:
     return []
 
 
+def send_voice_to_chat(chat_id, ogg_bytes: bytes, caption: str = "") -> bool:
+    """Sprachnachricht (OGG/Opus) senden — gleicher Verifizierungs-Chokepoint wie Text."""
+    if not enabled() or not chat_id or not ogg_bytes:
+        return False
+    if not is_verified(chat_id):
+        print(f"[messaging] BLOCKIERT: Sprachnachricht an nicht verifizierte Chat-ID {chat_id} abgelehnt.")
+        return False
+    try:
+        data = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption[:1000]
+        r = requests.post(_api("sendVoice"), data=data,
+                          files={"voice": ("antwort.ogg", ogg_bytes, "audio/ogg")}, timeout=30)
+        return r.ok
+    except Exception:
+        return False
+
+
+def download_file(file_id: str) -> bytes | None:
+    """Telegram-Datei (z. B. Sprachnachricht) herunterladen: getFile → file_path → Download."""
+    if not enabled() or not file_id:
+        return None
+    try:
+        r = requests.get(_api("getFile"), params={"file_id": file_id}, timeout=15)
+        if not r.ok:
+            return None
+        path = (r.json().get("result") or {}).get("file_path")
+        if not path:
+            return None
+        token = _cfg().get("telegram_bot_token", "")
+        fr = requests.get(f"https://api.telegram.org/file/bot{token}/{path}", timeout=30)
+        return fr.content if fr.ok else None
+    except Exception:
+        return None
+
+
 def bot_info() -> dict:
     if not enabled():
         return {"ok": False, "error": "deaktiviert oder kein Token"}

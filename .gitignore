@@ -51,3 +51,6 @@ deploy/desktop/**/node_modules/
 .DS_Store
 Thumbs.db
 *.swp
+
+# Persistente Observability-Logs (JSONL)
+orchestrator/logs/

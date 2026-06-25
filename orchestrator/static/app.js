@@ -9,6 +9,8 @@ const hintEl   = document.getElementById("hint");
 const player   = document.getElementById("player");
 
 let busy = false;          // Verlauf führt jetzt der Server pro Session
+let currentAbort = null;   // AbortController des laufenden Streams (Barge-in #12)
+let ttsStop = false;       // Signal: laufende Sprachausgabe sofort stoppen (Barge-in #12)
 
 const hud = new JarvisHUD(document.getElementById("hud"));
 hud.setState("IDLE");
@@ -101,13 +103,29 @@ async function pumpTTS() {
     if (ttsPlaying) return;
     ttsPlaying = true; hud.setState("SPEAKING");
     while (ttsQueue.length) {
+        if (ttsStop) break;                      // Barge-in: Wiedergabe abbrechen
         const t = ttsQueue.shift();
         try {
             const res = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: t }) });
-            if (res.ok) await playBlob(await res.blob());
+            if (res.ok && !ttsStop) await playBlob(await res.blob());
         } catch { /* ignore */ }
     }
-    ttsPlaying = false; hud.setState("IDLE");
+    ttsPlaying = false; ttsStop = false; hud.setState("IDLE");
+}
+
+// Barge-in (#12): laufende Antwort + Sprachausgabe sofort stoppen und den Turn serverseitig abbrechen.
+function bargeIn() {
+    ttsStop = true;
+    ttsQueue = [];
+    try { player.pause(); player.currentTime = 0; } catch { /* ignore */ }
+    if (currentAbort) { try { currentAbort.abort(); } catch { /* ignore */ } }
+    if (sessionId) {
+        fetch("/api/chat/cancel", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId }),
+        }).catch(() => {});
+    }
+    hud.setState("IDLE");
 }
 
 async function sendMessage(text, meta) {
@@ -121,11 +139,14 @@ async function sendMessage(text, meta) {
 
     const bubble = addMsg("assistant", "");
     const tts = ttsOn.checked;
+    ttsStop = false;
     let full = "";
+    currentAbort = new AbortController();
     try {
         const res = await fetch("/api/chat/stream", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ message: text, session_id: sessionId }),
+            signal: currentAbort.signal,
         });
         if (!res.ok || !res.body) throw new Error("Stream-Fehler " + res.status);
         const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
@@ -143,6 +164,11 @@ async function sendMessage(text, meta) {
                     chatEl.scrollTop = chatEl.scrollHeight;
                     if (tts) enqueueTTS(ev.data.text);
                     setHint("");
+                } else if (ev.event === "status") {            // #11 Fortschritt anzeigen
+                    setHint(ev.data.text);
+                } else if (ev.event === "cancelled") {         // #12 Barge-in bestätigt
+                    if (!full) bubble.lastChild.textContent = "(abgebrochen)";
+                    setHint("Abgebrochen.");
                 } else if (ev.event === "done") {
                     if (!full && ev.data.content) {
                         full = ev.data.content; bubble.lastChild.textContent = full;
@@ -156,8 +182,14 @@ async function sendMessage(text, meta) {
         }
         if (!full) { bubble.lastChild.textContent = "(keine Antwort)"; setHint("Leere Antwort — nochmal versuchen.", true); }
     } catch (e) {
-        setHint("Fehler: " + e.message, true);
+        if (e.name === "AbortError") {           // Barge-in: kein Fehler, Nutzer hat unterbrochen
+            if (!full) bubble.lastChild.textContent = "(abgebrochen)";
+            setHint("Abgebrochen.");
+        } else {
+            setHint("Fehler: " + e.message, true);
+        }
     } finally {
+        currentAbort = null;
         setBusy(false);
         inputEl.focus();
         if (!tts) hud.setState("IDLE");     // bei TTS regelt pumpTTS den Zustand
@@ -174,7 +206,8 @@ async function toggleMic() {
         mediaRecorder.stop();
         return;
     }
-    if (busy) return;
+    // Barge-in (#12): spricht/antwortet Jarvis noch, beim Mic-Klick sofort unterbrechen und zuhören.
+    if (busy || ttsPlaying) bargeIn();
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorder = new MediaRecorder(stream);

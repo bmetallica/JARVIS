@@ -1,0 +1,25 @@
+[Unit]
+# SH-Mark-XL / JARVIS Orchestrator (Tier 1, FastAPI auf :8088)
+# Installation:
+#   sudo cp /opt/JARVIS/orchestrator/jarvis-orchestrator.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now jarvis-orchestrator
+Description=JARVIS / SH-Mark-XL Orchestrator (Tier 1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+WorkingDirectory=/opt/JARVIS/orchestrator
+ExecStart=/opt/JARVIS/orchestrator/run.sh
+# Sauber neu starten, falls der Prozess abstürzt oder der GPU-Server kurz weg ist
+Restart=always
+RestartSec=5
+# Logs landen im journal: journalctl -u jarvis-orchestrator -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis
+
+[Install]
+WantedBy=multi-user.target

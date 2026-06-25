@@ -2,6 +2,11 @@
 
 > Stand: 2026-06-19. Dieses Dokument fasst den lauffähigen Stand zusammen, damit wir nahtlos weiterarbeiten können.
 > Detail-Roadmap: [`roadmap.md`](./roadmap.md) · überarbeiteter Plan: [`umbau_v3.md`](./umbau_v3.md)
+>
+> **Update 2026-06-24:** Autostart-Dienst (`orchestrator/jarvis-orchestrator.service`), Robustheits-/
+> Gedächtnis-Fixes und 5 größere Verbesserungen (persistenter Verlauf, Token-Budget, Observability,
+> MCP Deferred-Loading, Eval-Harness) — Details: [`orchestrator/CHANGES-2026-06-24.md`](./orchestrator/CHANGES-2026-06-24.md).
+> Agenten-Modell ist jetzt **qwen3-14b @ ctx 40960** (gemma4-12b = Vision).
 
 ## Überblick
 Aus der Windows-App **Mark-XL** wird **SH-Jarvis**, ein verteiltes, deutschsprachiges KI-Ökosystem.
@@ -56,6 +61,7 @@ FastAPI. Start: `./run.sh` (oder uvicorn auf 0.0.0.0:8088 mit certs/). Startup l
 
 ## Performance (warm)
 Einfache Turns ~1–2 s · Tool-Turns ~2–4 s · MCP mehrstufig ~4–15 s. Kaltstart hängt an llama-swap (Modell-Pinning ist Nutzer-Aufgabe).
+**Prompt-Caching** (`cache_prompt`, Default an, Admin-UI): llama.cpp wiederverwendet den KV-Cache des stabilen System-Prompt-Präfix → schnellerer Prefill. Cache bricht ab, wenn sich das Präfix ändert (Tool-Liste/System-Prompt) oder llama-swap das Modell wechselt.
 
 ## Aktuelle Nutzer/Daten (DB)
 Nutzer: `admin` (PW gesetzt), `daniel`, `test`, `Jordan` (passwortlos). Gedächtnis-Namespaces: `u2` (Daniel: Name/Adresse/Familie), `u3`. Stimmprofile: vom Nutzer live zu pflegen.

@@ -46,6 +46,25 @@ def recall_memory(cfg: dict, query: str, namespace: str = "default",
     return store.search("memory", emb, namespace=namespace, k=k, min_score=min_score)
 
 
+# ── Cross-Session-Recall: vergangene Gespräche (Phase 1) ───────────────────────
+
+def index_conversation(cfg: dict, user_text: str, assistant_text: str,
+                       namespace: str = "default", source: str = "") -> None:
+    """Einen Wortwechsel (Nutzer+Jarvis) für späteren Recall embedden und ablegen (kind='conversation')."""
+    snippet = f"Nutzer: {user_text}\nJarvis: {assistant_text}".strip()
+    if len(snippet) < 12:
+        return
+    emb = services.embed([snippet], cfg, task="search_document")[0]
+    store.add("conversation", snippet, emb, namespace=namespace, source=source)
+
+
+def recall_conversation(cfg: dict, query: str, namespace: str = "default",
+                        k: int = 5, min_score: float = 0.45) -> list[dict]:
+    """Relevante frühere Wortwechsel dieses Nutzers semantisch finden."""
+    emb = services.embed([query], cfg, task="search_query")[0]
+    return store.search("conversation", emb, namespace=namespace, k=k, min_score=min_score)
+
+
 # ── Wissensbasis (Dokumente) ───────────────────────────────────────────────────
 
 def ingest_document(cfg: dict, source: str, text: str, namespace: str = "default") -> int:

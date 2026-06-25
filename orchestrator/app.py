@@ -19,7 +19,7 @@ import re
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Cookie
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Cookie, Request
 from fastapi.responses import Response, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -39,6 +39,9 @@ import watchers
 import skills
 import sandbox
 import messaging
+import context_budget
+import profile as user_profile
+import calendars
 from session_hub import hub
 
 BASE_DIR   = Path(__file__).resolve().parent
@@ -91,6 +94,65 @@ def models(jarvis_admin_token: str | None = Cookie(default=None)):
         return {"models": services.list_models(config.get())}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM nicht erreichbar: {e}")
+
+
+@app.get("/api/admin/model-registry")
+def model_registry_get(jarvis_admin_token: str | None = Cookie(default=None)):
+    """Modell-Registry (Phase 0): aktuelle Rollen-Zuweisung + verfügbare Modelle vom LLM-Server."""
+    _admin(jarvis_admin_token)
+    cfg = config.get()
+    try:
+        available = services.list_models(cfg)
+    except Exception:
+        available = []
+    return {"registry": cfg.get("models", []), "available": available,
+            "effective": {r: {"model": config.model_for(r, cfg), "ctx": config.ctx_for(r, cfg)}
+                          for r in ("agent", "vision", "subagent")}}
+
+
+@app.post("/api/admin/model-registry")
+def model_registry_set(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Registry speichern; spiegelt llm_model/vision_model/llm_ctx (Phase 0)."""
+    _admin(jarvis_admin_token)
+    models = (body or {}).get("models") or []
+    cfg = config.apply_models(models)
+    return {"registry": cfg.get("models", []), "llm_model": cfg.get("llm_model"),
+            "vision_model": cfg.get("vision_model"), "llm_ctx": cfg.get("llm_ctx")}
+
+
+@app.get("/api/admin/calendars")
+def admin_calendars(jarvis_admin_token: str | None = Cookie(default=None)):
+    """Übersicht aller Kalender + iCal-Links (für den Admin)."""
+    _admin(jarvis_admin_token)
+    import calendars as _cal
+    _cal.init()
+    base = (config.get().get("calendar_base_url") or "").rstrip("/")
+    out = []
+    with store._conn() as c:
+        rows = c.execute("SELECT c.id, c.owner_user_id, c.name, c.kind, c.ics_token, "
+                         "(SELECT COUNT(*) FROM calendar_events e WHERE e.calendar_id=c.id) "
+                         "FROM calendars c ORDER BY c.kind DESC, c.name;").fetchall()
+    for r in rows:
+        owner = auth.username_by_id(r[1]) if r[1] else None
+        out.append({"id": r[0], "name": r[2], "kind": r[3], "owner": owner, "events": r[5],
+                    "ics": f"{base}/calendar/cal/{r[4]}.ics"})
+    return {"calendars": out}
+
+
+@app.get("/api/admin/user-profiles")
+def user_profiles_get(jarvis_admin_token: str | None = Cookie(default=None)):
+    """Nutzermodelle (Phase 3) ansehen."""
+    _admin(jarvis_admin_token)
+    return {"profiles": store.profile_all()}
+
+
+@app.post("/api/admin/user-profile")
+def user_profile_set(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Nutzermodell (Phase 3) editieren/leeren."""
+    _admin(jarvis_admin_token)
+    b = body or {}
+    store.profile_set(int(b.get("user_id")), (b.get("content") or "").strip())
+    return {"ok": True}
 
 
 # ── Selbstbedienung im normalen UI (kein Admin nötig) ─────────────────────────
@@ -178,7 +240,13 @@ _TOOL_HINT = (
     "client_action verwenden. Bei mehreren verbundenen Rechnern den Ziel-Rechner über `device` wählen — nennt der "
     "Nutzer einen (z.B. 'auf VM'), exakt diesen Namen als device übergeben; mit list_clients siehst du die Namen. "
     "Persönliche Fakten des Nutzers SOFORT und STILL mit save_memory speichern (nicht ankündigen). "
+    "Will der Nutzer eine NOTIZ festhalten ('Notiz: …', 'notiere …', 'in Obsidian …'), save_note nutzen "
+    "(landet in seiner Obsidian-Vault) — nicht mit save_memory verwechseln. "
+    "TERMINE/Kalender: add_event/list_events/update_event/delete_event; Kalender teilen mit share_calendar; "
+    "Abo-Links über calendar_subscription. Einen EXTERNEN iCal-Kalender (Google/Nextcloud/Arbeit) bindet "
+    "subscribe_calendar ein, damit du die Termine kennst. Zeiten als ISO 8601 lokal (Europe/Berlin) anhand des Datums oben. "
     "Bei Fragen zu eigenen Dokumenten/Unterlagen knowledge_search nutzen. "
+    "Bezieht sich die Frage auf etwas FRÜHER Besprochenes ('was hatten wir neulich zu…'), recall_conversation nutzen. "
     "Für wiederkehrende oder geplante Aufgaben, an die JARVIS SELBSTSTÄNDIG denken soll "
     "('erinnere mich täglich…', 'prüfe stündlich… und sag Bescheid wenn…', 'wenn X erkannt wird, …'), "
     "create_automation nutzen (list_automations/update_automation/cancel_automation zum Verwalten). "
@@ -192,6 +260,8 @@ _TOOL_HINT = (
     "HANDLE statt anzukündigen: Wenn du sagst, dass du etwas tust (Skill bauen/ändern, Aktion auslösen), dann führe es in "
     "DERSELBEN Antwort per Werkzeug aus — schreibe NICHT 'ich werde jetzt…' und höre dann auf. Behaupte NIE, etwas getan "
     "zu haben (Skill erstellt/geändert, gesendet, ausgelöst), ohne das Werkzeug wirklich aufgerufen zu haben. "
+    "Stütze die Erfolgsmeldung auf das ECHTE Tool-Ergebnis (zitiere die Bestätigung); meldet das Werkzeug einen Fehler, "
+    "sage das ehrlich statt Erfolg zu behaupten. "
     "Erfinde KEINE Daten in Skills (z.B. fest eingetragene Listen) — hol sie zur Laufzeit aus der echten Quelle. "
     "Brauchst du die API/Funktionsweise eines GitHub-Projekts, lies die ECHTEN Quelldateien über raw.githubusercontent.com "
     "(per fetch_url) statt nur web_search/research-Zusammenfassungen. "
@@ -220,18 +290,27 @@ async def _prepare_turn(req: ChatRequest):
     sid = req.session_id or "anon"
     identity = hub.get_identity(sid)          # pro Äußerung aus der Stimme
     user_id = identity["user_id"] if identity else None
-    if user_id != hub.last_user(sid):         # Sprecherwechsel → Kontext + Onboarding zurücksetzen
-        hub.reset_history(sid)
-        hub.set_last_user(sid, user_id)
+    prev_user = hub.last_user(sid)
+    # Verlauf NUR bei echtem Wechsel zwischen zwei BEKANNTEN Personen trennen.
+    # Eine kurzzeitige Nicht-Erkennung (user_id=None, Stimme knapp unter Schwelle) darf den
+    # Kontext NICHT löschen — sonst „vergisst“ Jarvis bei wackeliger Stimm-ID ständig alles.
+    if user_id is not None and prev_user is not None and user_id != prev_user:
+        hub.reset_history(sid)                # echter Personenwechsel → Kontext + Onboarding zurücksetzen
         hub.set_onboarding_state(sid, None)
+    if user_id is not None:                   # nur bekannte Identität merken; None nicht überschreiben
+        hub.set_last_user(sid, user_id)
 
     namespace = f"u{user_id}" if user_id else "guest"
-    ctx = {"session_id": sid, "cfg": cfg, "namespace": namespace, "user_id": user_id}
+    ctx = {"session_id": sid, "cfg": cfg, "namespace": namespace, "user_id": user_id,
+           "username": (identity or {}).get("username"), "user_message": req.message}
 
     # ── Deterministisches Onboarding bei unbekannter Stimme ────────────────────
     onboarding_q = None
     answering_onboarding = False
-    guest_voice = identity is None and hub.get_last_voice(sid) is not None
+    # „Unbekannte Stimme“-Onboarding NUR, wenn die Session noch nie eine bekannte Person hatte.
+    # War zuvor jemand erkannt (prev_user), ist ein momentanes None nur ein Erkennungs-Aussetzer —
+    # dann NICHT erneut nach Registrierung fragen und den Verlauf NICHT löschen.
+    guest_voice = identity is None and hub.get_last_voice(sid) is not None and prev_user is None
     if identity is not None:
         hub.set_onboarding_state(sid, None)
     elif guest_voice:
@@ -277,10 +356,33 @@ async def _prepare_turn(req: ChatRequest):
     except Exception:
         pass
 
+    # Agent-kuratiertes Nutzermodell (Phase 3): kohärentes Profil des erkannten Sprechers.
+    if user_id and cfg.get("profile_enabled", True):
+        try:
+            prof = await asyncio.to_thread(user_profile.get, user_id)
+            if prof:
+                system += "\n\nProfil des Sprechers (fortgeschrieben):\n" + prof
+        except Exception:
+            pass
+
+    # Rollierende Zusammenfassung früher getrimmter Turns (aus #3 Kontext-Budget).
+    _summary = hub.get_summary(sid)
+    if _summary:
+        system += "\n\nZusammenfassung des bisherigen Gesprächs:\n" + _summary
+    # Tool-Ergebnis-Gedächtnis: letzte Werkzeug-Ausgaben für Rückfragen darauf verfügbar machen.
+    _last_tools = hub.get_last_tools(sid)
+    if _last_tools:
+        system += ("\n\nLetzte Werkzeug-Ergebnisse dieser Unterhaltung (nutze sie für Rückfragen, "
+                   "rufe das Werkzeug nicht erneut auf, wenn die Antwort hier schon steht):\n" +
+                   "\n".join(f"- [{x['name']}] {x['result']}" for x in _last_tools))
+
     system += skills.catalog_hint()           # deferred: nur Namen+Beschreibung der vorhandenen Skills
-    working = [{"role": "system", "content": system}] + list(hub.history(sid)) + \
+    system += mcp_hub.catalog_hint()          # deferred: MCP-Server als Katalog (Tools on demand laden)
+    history = context_budget.fit(sid, system, list(hub.history(sid)), req.message, cfg)
+    working = [{"role": "system", "content": system}] + history + \
               [{"role": "user", "content": req.message}]
-    available_tools = tools.TOOL_SCHEMAS + mcp_hub.tool_schemas()
+    # MCP-Tools sind deferred: nicht alle Schemas einblenden, sondern via Katalog + load_mcp_tools.
+    available_tools = list(tools.TOOL_SCHEMAS)
     # Denken steuerbar:
     #   auto     = Onboarding/Identität ODER MCP-Tools verfügbar (mehrstufig → Reasoning)
     #   adaptive = erst ohne Denken (schnell); bei Fehlschlag automatisch mit Denken wiederholen
@@ -291,7 +393,7 @@ async def _prepare_turn(req: ChatRequest):
     elif mode in ("never", "adaptive"):
         think = False                 # adaptive startet ohne Denken (1. Versuch)
     else:                             # auto
-        has_mcp = any(t["function"]["name"].startswith("mcp__") for t in available_tools)
+        has_mcp = mcp_hub.has_servers()    # MCP ist deferred → Verfügbarkeit am Hub prüfen, nicht an den Schemas
         think = guest_voice or has_mcp
     if answering_onboarding:
         think = True                  # Registrierungs-Antwort zuverlässig (mit Denken) verarbeiten
@@ -309,6 +411,93 @@ _REPEAT_ABORT = 4            # dasselbe (Name+Argumente) öfter im Turn = Schlei
 _LOOP_MSG = ("Ich bin in eine Werkzeug-Schleife geraten und habe abgebrochen, bevor es ausartet. "
              "Bitte formuliere die Anfrage etwas anders — oder schau, ob das Skill/Werkzeug wirklich ein "
              "Ergebnis liefert.")
+
+
+_TOOL_RESULT_MAX_CHARS = 24000   # Default-Sicherheitsnetz; passt zu ~16k effektivem Kontext.
+                                 # Bei größerem n_ctx via config 'tool_result_max_chars' hochsetzen.
+
+
+def _clamp_tool_result(result: str) -> str:
+    """Tool-Ergebnis hart kappen, bevor es in den LLM-Kontext geht. Ein einzelnes, riesiges
+    Ergebnis (große Datei, langer Shell-Output) würde sonst llama.cpp mit HTTP 400
+    exceed_context_size_error abwürgen → Turn ohne Antwort."""
+    lim = int(config.get().get("tool_result_max_chars", _TOOL_RESULT_MAX_CHARS))
+    if not isinstance(result, str) or len(result) <= lim:
+        return result
+    return (result[:lim]
+            + f"\n\n…[GEKÜRZT — {len(result)} Zeichen waren zu viel fürs Kontextfenster, "
+              f"nur die ersten {lim} übergeben.]")
+
+
+# Werkzeuge mit Außenwirkung — eine Erfolgsbehauptung MUSS auf einem geglückten dieser Aufrufe beruhen (#10).
+_SIDE_EFFECT_TOOLS = {"send_message", "client_action", "client_screenshot", "create_skill", "update_skill",
+                      "delete_skill", "create_automation", "create_watch_automation", "update_automation",
+                      "cancel_automation", "set_timer", "cancel_timer", "save_memory", "save_note",
+                      "add_event", "update_event", "delete_event", "share_calendar", "unshare_calendar",
+                      "subscribe_calendar", "unsubscribe_calendar"}
+# Vollzugs-Behauptungen (deutsch, Perfekt/Partizip). Treffer ohne passenden Tool-Aufruf = verdächtig.
+_CLAIM_RE = re.compile(
+    r"\b(gesendet|verschickt|geschickt|erledigt|ausgeführt|gestellt|eingerichtet|angelegt|erstellt|"
+    r"gelöscht|aktiviert|deaktiviert|eingeschaltet|ausgeschaltet|gespeichert|abgebrochen|hinzugefügt|"
+    r"verschoben|aktualisiert|geändert)\b", re.IGNORECASE)
+
+
+def _index_conversation_bg(ctx: dict, final: str) -> None:
+    """Wortwechsel für Cross-Session-Recall (Phase 1) im Hintergrund embedden — nur für bekannte Nutzer."""
+    ns = ctx.get("namespace")
+    if not final or not ns or ns == "guest":
+        return    # Gast-Gespräche nicht sitzungsübergreifend indexieren (Privacy)
+    cfg = ctx.get("cfg") or config.get()
+    user_msg = ctx.get("user_message") or ""
+
+    def _work():
+        try:
+            knowledge.index_conversation(cfg, user_msg, final, namespace=ns, source=ctx.get("session_id", ""))
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=_work, daemon=True).start()
+
+
+_profile_counter: dict = {}
+
+
+def _update_profile_bg(ctx: dict) -> None:
+    """Nutzermodell (Phase 3) alle N Turns im Hintergrund aus dem jüngsten Verlauf aktualisieren."""
+    cfg = ctx.get("cfg") or config.get()
+    uid = ctx.get("user_id")
+    if not uid or not cfg.get("profile_enabled", True):
+        return
+    every = max(1, int(cfg.get("profile_update_every", 6)))
+    n = _profile_counter.get(uid, 0) + 1
+    _profile_counter[uid] = n
+    if n % every != 0:
+        return
+    tail = hub.history(ctx.get("session_id"))[-8:]
+
+    def _work():
+        try:
+            user_profile.update_from_history(cfg, uid, tail)
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _finalize_turn(ctx: dict, sid: str, final: str) -> None:
+    """Turn-Abschluss: Tool-Gedächtnis (#2) + Verify-by-Tool (#10) + Gesprächs-Index (Phase 1) + Profil (Phase 3)."""
+    tt = ctx.get("turn_tools")
+    if tt:
+        hub.set_last_tools(sid, tt[-3:])
+    _index_conversation_bg(ctx, final)
+    _update_profile_bg(ctx)
+    # #10: Behauptet die Antwort eine Aktion mit Außenwirkung, ohne dass ein passendes Tool geglückt ist?
+    if final and _CLAIM_RE.search(final):
+        calls = ctx.get("turn_tool_calls") or []
+        ok = any((c["name"] in _SIDE_EFFECT_TOOLS or c["name"].startswith("mcp__")) and c["ok"] for c in calls)
+        if not ok:
+            debug.log("unverified_claim", session=sid, reply=final[:200],
+                      tools=[c["name"] for c in calls])
 
 
 def _degenerate_calls(calls: list, seen: dict) -> bool:
@@ -330,7 +519,8 @@ async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: l
     seen: dict = {}
     for _ in range(MAX_TOOL_STEPS):
         t0 = time.time()
-        tools_now = available_tools + skills.schemas_for(ctx.get("loaded_skills"))   # deferred: geladene Skills dazu
+        tools_now = (available_tools + skills.schemas_for(ctx.get("loaded_skills"))    # deferred: geladene Skills
+                     + mcp_hub.schemas_for(ctx.get("loaded_mcp")))                     # deferred: geladene MCP-Tools
         try:
             res = await asyncio.to_thread(services.llm_call, working, cfg, tools_now, think)
         except Exception as e:
@@ -349,7 +539,7 @@ async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: l
                     result = seen[key] + "\n\n(Hinweis: bereits abgerufen — nutze dieses Ergebnis und ANTWORTE " \
                              "jetzt dem Nutzer, rufe das Werkzeug NICHT erneut auf.)"
                 else:
-                    result = await tools.execute_tool(tc["name"], tc["args"], ctx)
+                    result = _clamp_tool_result(await tools.execute_tool(tc["name"], tc["args"], ctx))
                     seen[key] = result
                 working.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
             if len(seen) > 12:                                   # zu viele UNTERSCHIEDLICHe Aufrufe → Notbremse
@@ -381,6 +571,7 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
     content = r["content"] or "Entschuldige, das hat nicht geklappt — bitte versuche es nochmal."
     hub.append_history(sid, "user", req.message)
     hub.append_history(sid, "assistant", content)
+    _finalize_turn(ctx, sid, content)
     debug.log("turn_done", channel=channel, ms=int((time.time() - t0) * 1000),
               retried=retried, reply=content[:300])
     return content, identity
@@ -416,9 +607,14 @@ async def chat_stream(req: ChatRequest):
         loop = asyncio.get_running_loop()
         working = list(base_working)
         seen: dict = {}
-        for _ in range(MAX_TOOL_STEPS):
+        for step in range(MAX_TOOL_STEPS):
+            if hub.is_cancelled(sid):                 # #12 Barge-in: vor jedem Schritt prüfen
+                yield ("cancelled", ""); return
+            if step > 0:                              # #11 Fortschritt: nach einer Werkzeug-Runde
+                yield ("status", "denke weiter…")
             q: asyncio.Queue = asyncio.Queue()
-            tools_now = available_tools + skills.schemas_for(ctx.get("loaded_skills"))   # deferred: geladene Skills
+            tools_now = (available_tools + skills.schemas_for(ctx.get("loaded_skills"))    # deferred: Skills
+                         + mcp_hub.schemas_for(ctx.get("loaded_mcp")))                     # deferred: MCP-Tools
 
             def produce():
                 try:
@@ -433,11 +629,19 @@ async def chat_stream(req: ChatRequest):
 
             done = None
             while True:
-                ev = await q.get()
+                try:
+                    # Poll mit Timeout → Barge-in (#12) greift auch in der stillen Denkphase, nicht nur nach Sätzen.
+                    ev = await asyncio.wait_for(q.get(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    if hub.is_cancelled(sid):
+                        yield ("cancelled", ""); return
+                    continue
                 if ev is None:
                     break
                 if ev["type"] == "sentence":
                     yield ("sentence", ev["text"])
+                    if hub.is_cancelled(sid):         # #12 Barge-in: mitten im Satzstrom abbrechen
+                        yield ("cancelled", ""); return
                 elif ev["type"] == "error":
                     yield ("error", ev["detail"]); return
                 elif ev["type"] == "done":
@@ -448,12 +652,15 @@ async def chat_stream(req: ChatRequest):
                     yield ("final", _LOOP_MSG); return
                 working.append(done["raw"])
                 for tc in done["tool_calls"]:
+                    if hub.is_cancelled(sid):         # #12 Barge-in: vor jedem Werkzeug-Aufruf prüfen
+                        yield ("cancelled", ""); return
                     key = tc["name"] + "|" + json.dumps(tc.get("args") or {}, sort_keys=True)
                     if key in seen:
                         result = seen[key] + "\n\n(Hinweis: bereits abgerufen — nutze dieses Ergebnis und " \
                                  "ANTWORTE jetzt, rufe das Werkzeug NICHT erneut auf.)"
                     else:
-                        result = await tools.execute_tool(tc["name"], tc["args"], ctx)
+                        yield ("status", f"rufe {tc['name']} auf…")   # #11 Fortschritt: welches Werkzeug läuft
+                        result = _clamp_tool_result(await tools.execute_tool(tc["name"], tc["args"], ctx))
                         seen[key] = result
                     working.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
                 if len(seen) > 12:
@@ -465,6 +672,7 @@ async def chat_stream(req: ChatRequest):
 
     async def gen():
         final = ""
+        hub.clear_cancel(sid)                 # #12: evtl. altes Abbruch-Signal verwerfen
         # ── Deterministische Onboarding-Frage (kein LLM) ───────────────────────
         if onboarding_q:
             yield _sse("sentence", {"text": onboarding_q})
@@ -474,13 +682,31 @@ async def chat_stream(req: ChatRequest):
             return
         # ── adaptive: schneller Vorab-Versuch ohne Denken ──────────────────────
         if mode == "adaptive":
-            r = await _run_loop(cfg, ctx, base_working, available_tools, False)
+            # #11 Fortschritt auch im (nicht-streamenden) Fast-Pass: Tool-Aufrufe via Callback melden,
+            # während _run_loop nebenläufig arbeitet.
+            sq: asyncio.Queue = asyncio.Queue()
+            ctx["status_cb"] = lambda nm: sq.put_nowait(nm)
+            task = asyncio.create_task(_run_loop(cfg, ctx, base_working, available_tools, False))
+            while not task.done():
+                try:
+                    nm = await asyncio.wait_for(sq.get(), timeout=0.25)
+                    yield _sse("status", {"text": f"rufe {nm} auf…"})
+                except asyncio.TimeoutError:
+                    pass
+                if hub.is_cancelled(sid):              # #12 Barge-in auch im Fast-Pass
+                    task.cancel()
+                    hub.clear_cancel(sid)
+                    yield _sse("cancelled", {"content": ""})
+                    return
+            ctx.pop("status_cb", None)
+            r = task.result()
             if r["ok"]:
                 for s in _split_sentences(r["content"]):
                     yield _sse("sentence", {"text": s})
                 final = r["content"]
                 hub.append_history(sid, "user", req.message)
                 hub.append_history(sid, "assistant", final)
+                _finalize_turn(ctx, sid, final)
                 debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
                           retried=False, reply=final[:300])
                 yield _sse("done", {"content": final, "speaker": identity})
@@ -493,17 +719,50 @@ async def chat_stream(req: ChatRequest):
         async for kind, data in _stream_pass(use_think):
             if kind == "sentence":
                 yield _sse("sentence", {"text": data})
+            elif kind == "status":            # #11 Fortschritt (rufe X auf… / denke weiter…)
+                yield _sse("status", {"text": data})
+            elif kind == "cancelled":         # #12 Barge-in: Turn vom Nutzer unterbrochen
+                hub.clear_cancel(sid)
+                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
+                          cancelled=True, reply=final[:120])
+                if final:                     # bereits Gesagtes festhalten, damit der Verlauf stimmt
+                    hub.append_history(sid, "user", req.message)
+                    hub.append_history(sid, "assistant", final)
+                yield _sse("cancelled", {"content": final})
+                return
             elif kind == "error":
-                yield _sse("error", {"detail": data}); return
+                # Nicht still sterben („(keine Antwort)“): sichtbare Meldung + turn_done loggen.
+                debug.log("llm_error", channel="stream", error=str(data)[:200])
+                msg = "Entschuldige, das hat nicht geklappt — bitte versuche es nochmal."
+                if "exceed_context_size" in str(data) or "zu groß fürs Kontextfenster" in str(data):
+                    msg = ("Das war zu viel auf einmal fürs Kontextfenster (z.B. eine sehr große Datei). "
+                           "Frag bitte gezielter nach einem Ausschnitt.")
+                yield _sse("sentence", {"text": msg})
+                hub.append_history(sid, "user", req.message)
+                hub.append_history(sid, "assistant", msg)
+                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
+                          retried=(mode == "adaptive"), error=True, reply=msg)
+                yield _sse("done", {"content": msg, "speaker": identity})
+                return
             elif kind == "final":
                 final = data
         hub.append_history(sid, "user", req.message)
         hub.append_history(sid, "assistant", final)
+        _finalize_turn(ctx, sid, final)
         debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
                   retried=(mode == "adaptive"), reply=final[:300])
         yield _sse("done", {"content": final, "speaker": identity})
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/api/chat/cancel")
+async def chat_cancel(body: dict):
+    """Barge-in (#12): laufenden Turn dieser Session abbrechen. Der Stream-Loop prüft das Flag
+    zwischen Sätzen/Schritten (auch in der Denkphase) und stoppt sauber. Vom Frontend ausgelöst,
+    wenn der Nutzer erneut spricht/tippt, während Jarvis noch antwortet. Body: {session_id}."""
+    hub.request_cancel((body or {}).get("session_id") or "anon")
+    return {"cancelled": True}
 
 
 # ── WebSocket: quellen-bezogenes I/O-Routing (Timer-Alarme etc.) ──────────────
@@ -524,7 +783,13 @@ async def ws_endpoint(websocket: WebSocket):
         m = hub.meta(sid)
         automations.emit("device_connected", {"type": m.get("type"), "name": m.get("name"), "session_id": sid})
         while True:
-            await websocket.receive_text()      # Keepalive; eingehende Nachrichten ignorieren
+            raw = await websocket.receive_text()    # Keepalive + Steuernachrichten (Barge-in)
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if msg.get("type") == "cancel":          # #12 Barge-in über WS
+                hub.request_cancel(sid)
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -758,7 +1023,80 @@ async def _deliver_automation(autom: dict, text: str, payload: dict | None) -> N
                                 f"🤖 {autom['title']}: {text}")
 
 
-async def _handle_telegram_message(chat_id, text: str, sender: str = "") -> None:
+# ── Kalender: iCal-Abo-Feeds (nur LAN, token-gesichert) ───────────────────────
+
+def _is_lan(request: Request) -> bool:
+    import ipaddress
+    host = request.client.host if request.client else ""
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except Exception:
+        return False
+
+
+@app.get("/calendar/cal/{token}.ics")
+async def ics_calendar(token: str, request: Request):
+    if not config.get().get("calendar_enabled", True):
+        raise HTTPException(status_code=404, detail="Kalender deaktiviert.")
+    if not _is_lan(request):
+        raise HTTPException(status_code=403, detail="iCal-Abo nur im lokalen Netzwerk.")
+    ics = await asyncio.to_thread(calendars.ics_for_calendar, token)
+    if ics is None:
+        raise HTTPException(status_code=404, detail="Kalender nicht gefunden.")
+    return Response(content=ics, media_type="text/calendar; charset=utf-8")
+
+
+@app.get("/calendar/user/{token}.ics")
+async def ics_user(token: str, request: Request):
+    if not config.get().get("calendar_enabled", True):
+        raise HTTPException(status_code=404, detail="Kalender deaktiviert.")
+    if not _is_lan(request):
+        raise HTTPException(status_code=403, detail="iCal-Abo nur im lokalen Netzwerk.")
+    ics = await asyncio.to_thread(calendars.ics_for_user, token)
+    if ics is None:
+        raise HTTPException(status_code=404, detail="Abo nicht gefunden.")
+    return Response(content=ics, media_type="text/calendar; charset=utf-8")
+
+
+async def _calendar_sync_poller() -> None:
+    """Synchronisiert abonnierte externe iCal-Kalender periodisch (alle 30 Min)."""
+    while True:
+        await asyncio.sleep(60)            # kurz nach Start einmal, dann im Intervall
+        try:
+            if config.get().get("calendar_enabled", True):
+                await asyncio.to_thread(calendars.sync_all)
+        except Exception:
+            pass
+        await asyncio.sleep(1800)
+
+
+# Bitte um gesprochene Antwort (Telegram-Sprachnachricht).
+_TG_VOICE_RE = re.compile(r"(sprachnachricht|als sprache|gesprochen|münd|vorlesen|antworte.*sprach)", re.IGNORECASE)
+
+
+def _tts_ogg(text: str, cfg: dict) -> bytes | None:
+    """Text → TTS → OGG/Opus (Telegram-Sprachnachrichtenformat)."""
+    try:
+        import subprocess
+        audio, _ = services.synthesize(text, cfg)
+        p = subprocess.run(["ffmpeg", "-loglevel", "quiet", "-i", "pipe:0", "-c:a", "libopus", "-f", "ogg", "pipe:1"],
+                           input=audio, capture_output=True)
+        return p.stdout or None
+    except Exception:
+        return None
+
+
+async def _telegram_reply(chat_id, reply: str, prefer_voice: bool) -> None:
+    """Antwort senden — als Sprachnachricht, wenn gewünscht/sinnvoll, sonst Text (mit Fallback)."""
+    if prefer_voice and reply:
+        ogg = await asyncio.to_thread(_tts_ogg, reply, config.get())
+        if ogg and await asyncio.to_thread(messaging.send_voice_to_chat, chat_id, ogg):
+            return
+    await asyncio.to_thread(messaging.send_to_chat, chat_id, reply)
+
+
+async def _handle_telegram_message(chat_id, text: str, sender: str = "", prefer_voice: bool = False) -> None:
     """Eingehende Telegram-Nachricht → NUR für verifizierte Kontakte: Agenten-Turn + Antwort.
     Unbekannte/nicht zugeordnete Absender werden ausschließlich als „ausstehend" protokolliert —
     kein Agentenlauf, KEINE Antwort (Sicherheits-Anforderung)."""
@@ -780,7 +1118,35 @@ async def _handle_telegram_message(chat_id, text: str, sender: str = "") -> None
         reply, _ = await _run_chat(ChatRequest(message=text, session_id=sid), channel="telegram")
     except Exception as e:
         reply = f"Fehler: {e}"
-    await asyncio.to_thread(messaging.send_to_chat, chat_id, reply)
+    # Gesprochene Antwort, wenn der Nutzer sie wünscht ODER per Sprachnachricht geschrieben hat.
+    await _telegram_reply(chat_id, reply, prefer_voice or bool(_TG_VOICE_RE.search(text)))
+
+
+async def _handle_telegram_voice(chat_id, voice: dict, sender: str = "") -> None:
+    """Eingehende Telegram-SPRACHNACHRICHT: herunterladen → STT-transkribieren → wie Text verarbeiten.
+    Sicherheit wie bei Text: unverifizierte Chats werden nur als „ausstehend" protokolliert."""
+    if not await asyncio.to_thread(messaging.is_verified, chat_id):
+        messaging.add_pending(chat_id, sender, "[Sprachnachricht]")
+        debug.log("telegram_blocked", chat=chat_id, sender=sender, message="[Sprachnachricht]")
+        return
+    audio = await asyncio.to_thread(messaging.download_file, (voice or {}).get("file_id"))
+    if not audio:
+        await asyncio.to_thread(messaging.send_to_chat, chat_id, "Ich konnte die Sprachnachricht nicht laden.")
+        return
+    try:
+        text = await asyncio.to_thread(services.transcribe, audio, "voice.ogg", config.get())
+    except Exception as e:
+        debug.log("telegram_stt_error", chat=chat_id, error=str(e)[:200])
+        await asyncio.to_thread(messaging.send_to_chat, chat_id, f"Transkription fehlgeschlagen: {e}")
+        return
+    text = (text or "").strip()
+    if not text:
+        await asyncio.to_thread(messaging.send_to_chat, chat_id, "Ich habe in der Sprachnachricht nichts verstanden.")
+        return
+    debug.log("telegram_voice_in", chat=chat_id, message=text[:200])
+    # Transkription kurz bestätigen (STT kann sich verhören), dann verarbeiten — Sprach-In → Sprach-Out.
+    await asyncio.to_thread(messaging.send_to_chat, chat_id, f"🎙 „{text}“")
+    await _handle_telegram_message(chat_id, text, sender, prefer_voice=True)
 
 
 async def _telegram_poller() -> None:
@@ -800,11 +1166,14 @@ async def _telegram_poller() -> None:
             m = u.get("message") or u.get("edited_message") or {}
             chat = (m.get("chat") or {}).get("id")
             txt = m.get("text")
+            voice = m.get("voice") or m.get("audio")          # Sprachnachricht / Audiodatei
             frm = m.get("from") or {}
             sender = (frm.get("username") and "@" + frm["username"]) or \
                      " ".join(filter(None, [frm.get("first_name"), frm.get("last_name")])) or ""
             if chat and txt:
                 await _handle_telegram_message(chat, txt, sender)
+            elif chat and voice:
+                await _handle_telegram_voice(chat, voice, sender)
 
 
 @app.websocket("/ws/satellite")
@@ -1133,6 +1502,13 @@ def admin_debug_get(jarvis_admin_token: str | None = Cookie(default=None)):
     return {"enabled": debug.enabled, "events": debug.events()}
 
 
+@app.get("/api/admin/metrics")
+def admin_metrics(jarvis_admin_token: str | None = Cookie(default=None)):
+    """Aggregierte Betriebsmetriken (immer erfasst, überleben Debug-Aus) + letzte persistierte Ereignisse."""
+    _admin(jarvis_admin_token)
+    return {"metrics": debug.metrics(), "recent": debug.recent_persisted(200)}
+
+
 @app.post("/api/admin/debug")
 def admin_debug_toggle(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
     _admin(jarvis_admin_token)
@@ -1261,6 +1637,14 @@ async def admin_skill_update(body: dict, jarvis_admin_token: str | None = Cookie
 def admin_skill_delete(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
     _admin(jarvis_admin_token)
     return {"ok": skills.delete((body or {}).get("name", ""))}
+
+
+@app.post("/api/admin/skills/repair")
+async def admin_skill_repair(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Selbst-Reparatur eines instabilen Skills anstoßen (Phase 2)."""
+    _admin(jarvis_admin_token)
+    msg = await tools.repair_skill_impl((body or {}).get("name", ""), config.get())
+    return {"message": msg}
 
 
 @app.post("/api/admin/skills/run")
@@ -1555,6 +1939,9 @@ async def _startup():
 
     # Eingehender Messaging-Kanal (Telegram) — idlet, solange deaktiviert
     asyncio.create_task(_telegram_poller())
+
+    # Externe iCal-Abos periodisch abgleichen
+    asyncio.create_task(_calendar_sync_poller())
 
 
 @app.post("/api/stt")

@@ -29,6 +29,10 @@ class SessionHub:
         self._onboard: dict = {}     # session_id -> None | "asked" | "skipped"
         self._seen: dict = {}        # session_id -> {first, last, **telemetry}  (für Geräteliste)
         self._dev: dict = {}         # session_id -> ts (Dev-/Bau-Modus aktiv → Denken erzwingen)
+        self._loaded_hist: set = set()   # session_ids, deren Verlauf schon aus der DB geladen wurde
+        self._last_tools: dict = {}  # session_id -> [{name, result}]  (letzte Tool-Ergebnisse für Rückfragen)
+        self._summary: dict = {}     # session_id -> rollierende Zusammenfassung getrimmter alter Turns
+        self._cancel: dict = {}      # session_id -> True, wenn laufender Turn abgebrochen werden soll (Barge-in)
 
     def mark_dev(self, session_id: str | None) -> None:
         """Session ist in einem Entwicklungs-/Bau-Flow (Skill/Code/Browser-Automation)."""
@@ -63,7 +67,18 @@ class SessionHub:
         return self._identity.get(session_id) if session_id else None
 
     # ── Verlauf pro Session (vom Server geführt, NICHT vom Client) ──────────────
-    def history(self, session_id: str) -> list[dict]:
+    def history(self, session_id: str, limit: int = 20) -> list[dict]:
+        # Lazy-Load aus der DB beim ersten Zugriff nach (Neu-)Start → Verlauf überlebt Neustarts.
+        if session_id not in self._loaded_hist:
+            self._loaded_hist.add(session_id)
+            if session_id not in self._history:
+                try:
+                    import store
+                    loaded = store.history_load(session_id, limit)
+                    if loaded:
+                        self._history[session_id] = loaded
+                except Exception:
+                    pass
         return self._history.get(session_id, [])
 
     def append_history(self, session_id: str, role: str, content: str, limit: int = 20) -> None:
@@ -71,9 +86,49 @@ class SessionHub:
         h.append({"role": role, "content": content})
         if len(h) > limit:
             del h[:-limit]
+        # Write-Through in die DB (best-effort — bei DB-Ausfall läuft der Chat im RAM weiter).
+        try:
+            import store
+            store.history_append(session_id, role, content)
+        except Exception:
+            pass
 
     def reset_history(self, session_id: str) -> None:
         self._history[session_id] = []
+        self._summary.pop(session_id, None)
+        self._last_tools.pop(session_id, None)
+        try:
+            import store
+            store.history_reset(session_id)
+        except Exception:
+            pass
+
+    # ── Tool-Ergebnis-Gedächtnis (für Rückfragen zu zuvor Geholtem) ───────────
+    def set_last_tools(self, session_id: str, items: list[dict]) -> None:
+        """items: [{name, result}] — die Tool-Ergebnisse des letzten Turns (gekappt gespeichert)."""
+        if items:
+            self._last_tools[session_id] = items
+
+    def get_last_tools(self, session_id: str) -> list[dict]:
+        return self._last_tools.get(session_id, [])
+
+    # ── Barge-in: laufenden Turn abbrechen ────────────────────────────────────
+    def request_cancel(self, session_id: str) -> None:
+        if session_id:
+            self._cancel[session_id] = True
+
+    def is_cancelled(self, session_id: str) -> bool:
+        return bool(self._cancel.get(session_id))
+
+    def clear_cancel(self, session_id: str) -> None:
+        self._cancel.pop(session_id, None)
+
+    # ── Rollierende Zusammenfassung getrimmter alter Turns ────────────────────
+    def get_summary(self, session_id: str) -> str:
+        return self._summary.get(session_id, "")
+
+    def set_summary(self, session_id: str, text: str) -> None:
+        self._summary[session_id] = text
 
     def last_user(self, session_id: str):
         return self._last_uid.get(session_id)

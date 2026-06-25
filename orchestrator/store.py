@@ -56,6 +56,117 @@ def _vec_literal(vec: list[float]) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
 
 
+# ── Kurzzeitgedächtnis: persistenter Gesprächsverlauf ────────────────────────
+# Überlebt Neustarts (vorher nur im RAM von session_hub). Pro session_id, mit user_key
+# zur Trennung verschiedener Sprecher.
+_history_initialised = False
+
+
+def _history_init() -> None:
+    global _history_initialised
+    if _history_initialised:
+        return
+    init()
+    with _conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id         BIGSERIAL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                user_key   TEXT,
+                role       TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS chat_history_sid_idx ON chat_history (session_id, id);")
+    _history_initialised = True
+
+
+def history_append(session_id: str, role: str, content: str, user_key: str | None = None) -> None:
+    _history_init()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO chat_history (session_id, user_key, role, content) VALUES (%s, %s, %s, %s);",
+            (session_id, user_key, role, content),
+        )
+
+
+def history_load(session_id: str, limit: int = 20) -> list[dict]:
+    """Letzte `limit` Nachrichten dieser Session in chronologischer Reihenfolge."""
+    _history_init()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT role, content FROM chat_history WHERE session_id=%s ORDER BY id DESC LIMIT %s;",
+            (session_id, limit),
+        ).fetchall()
+    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+
+def history_reset(session_id: str) -> None:
+    _history_init()
+    with _conn() as c:
+        c.execute("DELETE FROM chat_history WHERE session_id=%s;", (session_id,))
+
+
+# ── Agent-kuratiertes Nutzermodell (Phase 3) ─────────────────────────────────
+_profile_initialised = False
+
+
+def _profile_init() -> None:
+    global _profile_initialised
+    if _profile_initialised:
+        return
+    init()
+    with _conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_profile (
+                user_id    BIGINT PRIMARY KEY,
+                content    TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMPTZ DEFAULT now()
+            );
+        """)
+    _profile_initialised = True
+
+
+def profile_get(user_id: int) -> str:
+    if user_id is None:
+        return ""
+    _profile_init()
+    with _conn() as c:
+        row = c.execute("SELECT content FROM user_profile WHERE user_id=%s;", (user_id,)).fetchone()
+    return row[0] if row else ""
+
+
+def profile_set(user_id: int, content: str) -> None:
+    if user_id is None:
+        return
+    _profile_init()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO user_profile (user_id, content, updated_at) VALUES (%s, %s, now()) "
+            "ON CONFLICT (user_id) DO UPDATE SET content=EXCLUDED.content, updated_at=now();",
+            (user_id, content),
+        )
+
+
+def profile_all() -> list[dict]:
+    _profile_init()
+    with _conn() as c:
+        rows = c.execute("SELECT user_id, content, updated_at FROM user_profile ORDER BY user_id;").fetchall()
+    return [{"user_id": r[0], "content": r[1], "updated_at": str(r[2])} for r in rows]
+
+
+def history_trim(session_id: str, keep: int = 200) -> None:
+    """Alte Zeilen kappen, damit die Tabelle nicht unbegrenzt wächst (behält die neuesten `keep`)."""
+    _history_init()
+    with _conn() as c:
+        c.execute(
+            "DELETE FROM chat_history WHERE session_id=%s AND id NOT IN "
+            "(SELECT id FROM chat_history WHERE session_id=%s ORDER BY id DESC LIMIT %s);",
+            (session_id, session_id, keep),
+        )
+
+
 def add(kind: str, content: str, embedding: list[float],
         namespace: str = "default", source: str = "") -> int:
     init()

@@ -12,17 +12,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
 import auth
 import automations
 import biometrics
+import calendars
 import config
 import debug
 import knowledge
 import mcp_hub
 import messaging
+import obsidian
 import sandbox
 import services
 import skills
@@ -211,6 +214,150 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "save_note",
+            "description": "Speichert eine NOTIZ in der persönlichen Obsidian-Vault des Nutzers. Nutze dies, wenn "
+                           "der Nutzer ausdrücklich eine Notiz festhalten will (z. B. 'Notiz: …', 'schreib in "
+                           "Obsidian …', 'notiere …'). Für reine persönliche FAKTEN über den Nutzer stattdessen "
+                           "save_memory verwenden.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Inhalt der Notiz."},
+                    "title": {"type": "string", "description": "Optionaler Titel → eigene Note <Titel>.md; "
+                                                               "ohne Titel wird die Notiz an die Inbox angehängt."},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_event",
+            "description": "Trägt einen TERMIN in einen Kalender ein. Zeiten als ISO 8601 in LOKALER Zeit "
+                           "(Europe/Berlin), z. B. '2026-06-26T15:00'. Nutze das Datum/die Uhrzeit oben im Prompt, "
+                           "um relative Angaben ('morgen 15 Uhr') umzurechnen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start": {"type": "string", "description": "Start, ISO 8601 lokal (bei ganztägig: YYYY-MM-DD)."},
+                    "end": {"type": "string", "description": "Ende (optional; Standard +1 Std)."},
+                    "calendar": {"type": "string", "description": "'own' (eigener, Standard), 'common' (gemeinsam) "
+                                                                  "oder ein Nutzername (dessen Kalender, falls freigegeben)."},
+                    "description": {"type": "string"},
+                    "location": {"type": "string"},
+                    "all_day": {"type": "boolean"},
+                    "recurrence": {"type": "string", "description": "none|daily|weekly|monthly|yearly"},
+                },
+                "required": ["title", "start"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_events",
+            "description": "Listet anstehende Termine über alle zugänglichen Kalender (oder einen bestimmten). "
+                           "Zeitfenster optional als ISO-Datum; Standard: nächste 7 Tage.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "description": "Startdatum (ISO, optional)."},
+                    "to": {"type": "string", "description": "Enddatum (ISO, optional)."},
+                    "calendar": {"type": "string", "description": "'own'|'common'|Nutzername (optional, sonst alle)."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_event",
+            "description": "Ändert einen Termin (per event_id aus list_events). Nur Ersteller/Kalenderbesitzer/Admin.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "integer"},
+                    "title": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"},
+                    "description": {"type": "string"}, "location": {"type": "string"},
+                    "all_day": {"type": "boolean"}, "recurrence": {"type": "string"},
+                },
+                "required": ["event_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_event",
+            "description": "Löscht/trägt einen Termin aus (per event_id). Nur Ersteller/Kalenderbesitzer/Admin.",
+            "parameters": {"type": "object", "properties": {"event_id": {"type": "integer"}}, "required": ["event_id"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "share_calendar",
+            "description": "Gibt den EIGENEN Kalender für einen anderen JARVIS-Nutzer frei.",
+            "parameters": {
+                "type": "object",
+                "properties": {"username": {"type": "string"},
+                               "access": {"type": "string", "description": "read (Standard) | write"}},
+                "required": ["username"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unshare_calendar",
+            "description": "Entzieht einem Nutzer die Freigabe für den eigenen Kalender.",
+            "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_subscription",
+            "description": "Nennt die iCal-Abo-Links (nur im LAN) des Nutzers — für Kalender-Apps wie Apple "
+                           "Kalender, Thunderbird oder DAVx5.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "subscribe_calendar",
+            "description": "ABONNIERT einen EXTERNEN iCal-Kalender (URL, z. B. Google/Nextcloud/Arbeit), damit "
+                           "JARVIS die Termine des Nutzers kennt und in list_events berücksichtigt. Read-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "iCal-/ICS-URL (http/https/webcal)."},
+                               "name": {"type": "string", "description": "Anzeigename (optional)."}},
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unsubscribe_calendar",
+            "description": "Entfernt ein externes iCal-Abo (per Name).",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendar_subscriptions",
+            "description": "Listet die externen iCal-Abos des Nutzers (Name, Termine, letzter Abgleich).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_user",
             "description": "Legt ein neues Nutzerprofil (passwortlos) an. Kein Admin nötig. Falls gerade eine "
                            "nicht erkannte Stimme vorliegt, wird sie automatisch als Stimmprofil hinterlegt. "
@@ -345,6 +492,49 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "recall_conversation",
+            "description": "Durchsucht FRÜHERE GESPRÄCHE mit diesem Nutzer (sitzungsübergreifend) nach relevanten "
+                           "Wortwechseln. Nutze dies, wenn sich die Frage auf etwas zuvor Besprochenes bezieht "
+                           "('was hatten wir neulich zu…', 'wie hieß nochmal das, worüber wir letzte Woche…').",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Worum ging es? (Suchbegriff/Thema)"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "repair_skill",
+            "description": "Repariert ein wiederholt scheiterndes Skill automatisch: analysiert den hinterlegten "
+                           "letzten Fehler und korrigiert den Code (Selbst-Verbesserung). Nutze dies, wenn ein "
+                           "Skill als instabil gemeldet ist.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Name des zu reparierenden Skills."}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_subagent",
+            "description": "Delegiert eine abgegrenzte, MEHRSTUFIGE Teilaufgabe an einen Teil-Agenten, der sie "
+                           "eigenständig mit Werkzeugen löst und nur das ENDERGEBNIS zurückgibt — hält deinen "
+                           "Kontext klein. Ideal für umfangreiche Unteraufgaben (z.B. 'recherchiere gründlich X "
+                           "und nenne 3 Kernpunkte'). Formuliere die Aufgabe klar und vollständig.",
+            "parameters": {
+                "type": "object",
+                "properties": {"task": {"type": "string", "description": "Vollständig formulierte Teilaufgabe."}},
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_automation",
             "description": "Legt eine AUTONOME Aufgabe an, die JARVIS später von selbst ausführt — "
                            "zeitgesteuert (einmalig, in N Minuten, täglich/wöchentlich zu einer Uhrzeit) ODER "
@@ -468,6 +658,30 @@ TOOL_SCHEMAS = [
             "description": "Sucht in den vorhandenen Skills (nach Name/Beschreibung). Leere Suche listet alle.",
             "parameters": {"type": "object",
                            "properties": {"query": {"type": "string", "description": "Suchbegriff (optional)."}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_mcp_tools",
+            "description": "Sucht externe MCP-Werkzeuge (z.B. Smart-Home) nach Stichwort. Liefert die vollen "
+                           "Namen mcp__<server>__<tool>, die du danach mit load_mcp_tools laden kannst.",
+            "parameters": {"type": "object",
+                           "properties": {"query": {"type": "string", "description": "Suchbegriff (optional)."}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_mcp_tools",
+            "description": "Lädt die genannten externen MCP-Werkzeuge, sodass du sie danach direkt als "
+                           "mcp__<server>__<tool> aufrufen kannst. Erst laden, dann aufrufen.",
+            "parameters": {
+                "type": "object",
+                "properties": {"names": {"type": "array", "items": {"type": "string"},
+                                         "description": "Volle Namen, z.B. mcp__domoticz__set_switch."}},
+                "required": ["names"],
+            },
         },
     },
     {
@@ -659,18 +873,238 @@ TOOL_SCHEMAS = [
 
 
 # Werkzeuge, die für Entwicklung/Bau stehen → schalten den „Dev-Modus" der Session an (erzwingt Denken).
-_DEV_TOOLS = {"create_skill", "update_skill", "delete_skill", "run_python", "run_shell",
+_DEV_TOOLS = {"create_skill", "update_skill", "delete_skill", "repair_skill", "run_python", "run_shell",
               "browse", "browser_click", "browser_type", "browser_screenshot", "create_watch_automation"}
+
+
+# Tools, deren Ergebnis NICHT ins Tool-Gedächtnis soll (Steuer-/Timer-/Geschwätz-Tools).
+_MEMORY_SKIP_TOOLS = {"set_timer", "list_timers", "cancel_timer", "describe_skill",
+                      "load_skills", "load_mcp_tools", "send_message"}
+
+# Fehler-Präfixe der Tool-Ergebnisse (deutsch) → für „ist der Aufruf geglückt?" (Verify-by-Tool #10).
+_FAIL_PREFIXES = ("fehler", "berechtigung verweigert", "autonom gesperrt", "kein ", "keine ",
+                  "unbekannt", "mir fehl", "abruf fehlgeschlagen", "der code ist nicht",
+                  "das skill läuft", "mcp-aufruf an")
+
+
+def _looks_failed(result: str) -> bool:
+    r = (result or "").strip().lower()
+    return any(r.startswith(p) for p in _FAIL_PREFIXES) or "fehlgeschlagen" in r[:60]
+
+
+def _strip_code_fences(text: str) -> str:
+    """Markdown-Codeblock-Zäune entfernen, falls das LLM doch welche liefert."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        nl = t.find("\n")
+        t = t[nl + 1:] if nl != -1 else t
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return t.strip()
+
+
+async def repair_skill_impl(name: str, cfg: dict) -> str:
+    """Selbst-Reparatur (Phase 2): hinterlegten Fehler + Code ans LLM, korrigierten Code syntaxgeprüft
+    übernehmen. Code-Änderung setzt das Skill aus Sicherheitsgründen auf Sandbox/nicht-autonom zurück."""
+    s = skills.get(name)
+    if not s:
+        return f"Kein Skill „{name}“ gefunden."
+    err = s.get("last_error")
+    if not err:
+        return f"Skill „{s['name']}“ hat keinen hinterlegten Fehler — nichts zu reparieren."
+    messages = [
+        {"role": "system", "content":
+            "Du bist ein erfahrener Python-Entwickler. Korrigiere das fehlerhafte Skill anhand der Fehlermeldung. "
+            "Antworte AUSSCHLIESSLICH mit dem vollständigen, korrigierten Python-Code (mit einer Funktion "
+            "run(args)) — ohne Erklärung, ohne Markdown-Zäune."},
+        {"role": "user", "content":
+            f"Skill „{s['name']}“. Letzter Fehler:\n{err}\n\nAktueller Code:\n{s.get('code', '')}"},
+    ]
+    try:
+        res = await asyncio.to_thread(services.llm_call, messages, cfg, None, True)
+    except Exception as e:
+        return f"Reparatur fehlgeschlagen (LLM nicht erreichbar): {e}"
+    code = _strip_code_fences(res.get("content", ""))
+    if not code.strip():
+        return "Die Reparatur lieferte keinen Code."
+    ok, e = skills.syntax_ok(code)
+    if not ok:
+        return "Die reparierte Fassung ist syntaktisch ungültig: " + e
+    skills.update(s["name"], code=code, trust="sandbox", autonomous_ok=False)
+    skills.clear_health(s["name"])
+    return (f"Skill „{s['name']}“ wurde repariert (Code aktualisiert, Syntax geprüft, Fehlerzähler zurückgesetzt; "
+            "erhöhte Rechte zur Sicherheit zurückgenommen). Bitte einmal ausführen, um die Funktion zu bestätigen.")
+
+
+_CALENDAR_TOOLS = {"add_event", "list_events", "update_event", "delete_event",
+                   "share_calendar", "unshare_calendar", "calendar_subscription",
+                   "subscribe_calendar", "unsubscribe_calendar", "list_calendar_subscriptions"}
+
+
+def _cal_fmt(dt, all_day: bool = False) -> str:
+    loc = dt.astimezone(calendars.LOCAL)
+    return loc.strftime("%a %d.%m.%Y (ganztägig)") if all_day else loc.strftime("%a %d.%m.%Y %H:%M")
+
+
+def _cal_bound(s: str | None, default):
+    if not s:
+        return default
+    try:
+        ss = s.strip()
+        if len(ss) <= 10:
+            d = date.fromisoformat(ss[:10])
+            return datetime(d.year, d.month, d.day, tzinfo=calendars.LOCAL).astimezone(timezone.utc)
+        return calendars.parse_dt(ss)
+    except Exception:
+        return default
+
+
+def _calendar_dispatch(name: str, args: dict, ctx: dict, uid: int) -> str:
+    """Synchroner Kalender-Handler (läuft im Thread; calendars.* ist DB-basiert/synchron)."""
+    cfg = ctx.get("cfg") or config.get()
+    if not cfg.get("calendar_enabled", True):
+        return "Die Kalenderfunktion ist deaktiviert."
+    is_admin = False
+    try:
+        is_admin = auth.is_admin(uid)
+    except Exception:
+        pass
+
+    if name == "add_event":
+        cal = calendars.resolve_calendar(uid, args.get("calendar"), ctx.get("username"))
+        if not cal:
+            return "Diesen Kalender finde ich nicht oder du hast keinen Zugriff."
+        if calendars.access_level(uid, cal) not in ("write", "owner"):
+            return f"Du hast nur Lesezugriff auf „{cal['name']}“."
+        try:
+            ev = calendars.add_event(cal["id"], uid, args["title"], args["start"], args.get("end"),
+                                     args.get("description", ""), args.get("location", ""),
+                                     bool(args.get("all_day")), args.get("recurrence", ""))
+        except Exception as e:
+            return f"Konnte den Termin nicht anlegen — prüfe das Zeitformat (ISO 8601, z. B. 2026-06-26T15:00): {e}"
+        full = calendars.get_event(ev["id"])
+        rec = f", Wiederholung {args.get('recurrence')}" if full["rrule"] else ""
+        return f"Termin „{full['title']}“ am {_cal_fmt(full['start_ts'], full['all_day'])} in „{cal['name']}“ eingetragen (ID {ev['id']}{rec})."
+
+    if name == "list_events":
+        now = datetime.now(timezone.utc)
+        start = _cal_bound(args.get("from"), now - timedelta(hours=1))
+        end = _cal_bound(args.get("to"), now + timedelta(days=7))
+        cal_id = None
+        if args.get("calendar"):
+            cal = calendars.resolve_calendar(uid, args.get("calendar"))
+            if not cal:
+                return "Diesen Kalender finde ich nicht."
+            cal_id = cal["id"]
+        evs = calendars.list_events(uid, start, end, cal_id)
+        if not evs:
+            return "In dem Zeitraum stehen keine Termine an."
+        lines = []
+        for e in evs:
+            when = (e["start_ts"].astimezone(calendars.LOCAL).strftime("%a %d.%m. %H:%M") if not e["all_day"]
+                    else e["start_ts"].astimezone(calendars.LOCAL).strftime("%a %d.%m. (ganztägig)"))
+            loc = f" @ {e['location']}" if e["location"] else ""
+            rec = " ↻" if e["rrule"] else ""
+            lines.append(f"#{e['id']} [{e['calendar']}] {when} — {e['title']}{loc}{rec}")
+        return "Termine:\n" + "\n".join(lines)
+
+    if name == "update_event":
+        ev = calendars.get_event(int(args.get("event_id") or 0))
+        if not ev:
+            return "Diesen Termin finde ich nicht."
+        if not calendars.can_modify_event(uid, ev, is_admin):
+            return "Diesen Termin darfst du nicht ändern (nur Ersteller, Kalenderbesitzer oder Admin)."
+        fields = {k: args.get(k) for k in ("title", "start", "end", "description", "location", "all_day", "recurrence")}
+        try:
+            calendars.update_event(ev["id"], **fields)
+        except Exception as e:
+            return f"Konnte den Termin nicht ändern: {e}"
+        return f"Termin #{ev['id']} aktualisiert."
+
+    if name == "delete_event":
+        ev = calendars.get_event(int(args.get("event_id") or 0))
+        if not ev:
+            return "Diesen Termin finde ich nicht (evtl. schon gelöscht)."
+        if not calendars.can_modify_event(uid, ev, is_admin):
+            return "Diesen Termin darfst du nicht löschen (nur Ersteller, Kalenderbesitzer oder Admin)."
+        calendars.delete_event(ev["id"])
+        return f"Termin „{ev['title']}“ wurde ausgetragen."
+
+    if name == "share_calendar":
+        u = auth.user_by_name((args.get("username") or "").strip())
+        if not u:
+            return f"Nutzer „{args.get('username')}“ nicht gefunden."
+        if u["id"] == uid:
+            return "Das ist dein eigener Kalender."
+        calendars.share(uid, u["id"], args.get("access", "read"))
+        acc = "schreiben" if str(args.get("access", "")).lower().startswith("w") else "lesen"
+        return f"Dein Kalender ist jetzt für {u['username']} freigegeben ({acc})."
+
+    if name == "unshare_calendar":
+        u = auth.user_by_name((args.get("username") or "").strip())
+        if not u:
+            return f"Nutzer „{args.get('username')}“ nicht gefunden."
+        calendars.unshare(uid, u["id"])
+        return f"Freigabe für {u['username']} entzogen."
+
+    if name == "calendar_subscription":
+        base = (cfg.get("calendar_base_url") or "").rstrip("/")
+        utok = calendars.user_token(uid)
+        cals = calendars.list_accessible(uid)
+        lines = [f"Kombinierter Abo-Link (alle deine Kalender):\n{base}/calendar/user/{utok}.ics", "",
+                 "Einzelne Kalender:"]
+        for c in cals:
+            lines.append(f"- {c['name']} ({c['access']}): {base}/calendar/cal/{c['ics_token']}.ics")
+        lines.append("\nIn der Kalender-App als Abo-/Kalender-URL hinzufügen — nur im LAN erreichbar "
+                     "(Zertifikat selbstsigniert).")
+        return "\n".join(lines)
+
+    if name == "subscribe_calendar":
+        url = (args.get("url") or "").strip().replace("webcal://", "https://")
+        if not url.startswith(("http://", "https://")):
+            return "Bitte eine gültige iCal-URL (http/https/webcal) angeben."
+        res = calendars.add_subscription(uid, args.get("name") or "Externer Kalender", url)
+        if res.get("error"):
+            return f"Abonniert, aber der erste Abgleich schlug fehl: {res['error']}"
+        return f"Kalender „{res['name']}“ abonniert — {res.get('synced', 0)} Termine übernommen. JARVIS kennt sie jetzt."
+
+    if name == "unsubscribe_calendar":
+        ok = calendars.remove_subscription(uid, (args.get("name") or "").strip())
+        return "Abo entfernt." if ok else "Kein passendes Abo gefunden."
+
+    if name == "list_calendar_subscriptions":
+        subs = calendars.list_subscriptions(uid)
+        if not subs:
+            return "Du hast keine externen Kalender abonniert."
+        lines = []
+        for s in subs:
+            err = f" ⚠ {s['last_error']}" if s["last_error"] else ""
+            lines.append(f"- {s['name']}: {s['events']} Termine (Stand {s['last_sync'] or 'nie'}){err}")
+        return "Abonnierte Kalender:\n" + "\n".join(lines)
+
+    return "Unbekannte Kalenderaktion."
 
 
 async def execute_tool(name: str, args: dict, ctx: dict) -> str:
     """Wrapper mit Debug-Aufzeichnung (Tool-Name, Argumente, Ergebnis, Dauer)."""
     t0 = time.time()
+    cb = ctx.get("status_cb")            # #11 Fortschritt: welches Werkzeug läuft gerade (nicht-streamender Pfad)
+    if cb:
+        try:
+            cb(name)
+        except Exception:
+            pass
     if name in _DEV_TOOLS:
         hub.mark_dev(ctx.get("session_id"))
     result = await _execute_tool_impl(name, args, ctx)
     debug.log("tool", name=name, args=args, result=str(result)[:400],
               ms=int((time.time() - t0) * 1000), user_id=ctx.get("user_id"))
+    # Vollständiger Mitschnitt ALLER Tool-Aufrufe dieses Turns (für Verify-by-Tool #10) — inkl. Erfolg.
+    ctx.setdefault("turn_tool_calls", []).append({"name": name, "ok": not _looks_failed(str(result))})
+    # Tool-Ergebnis-Gedächtnis: substanzielle Ergebnisse knapp mitschneiden, damit der Folge-Turn
+    # Rückfragen zum zuvor Geholten beantworten kann (Meta-/Steuer-Tools überspringen).
+    if name not in _MEMORY_SKIP_TOOLS and not name.startswith(("load_", "search_", "list_")):
+        ctx.setdefault("turn_tools", []).append({"name": name, "result": str(result)[:1500]})
     return result
 
 
@@ -797,17 +1231,41 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
             return "Keine passenden Skills vorhanden. Du kannst mit create_skill ein neues bauen."
         return "Skills:\n" + "\n".join(f"- {s['name']}: {s['description']}" for s in found)
 
+    if name == "search_mcp_tools":
+        found = mcp_hub.search(args.get("query") or "")
+        if not found:
+            return "Keine passenden externen MCP-Werkzeuge gefunden."
+        return "MCP-Werkzeuge:\n" + "\n".join(f"- {t['full_name']}: {t['description']}" for t in found)
+
+    if name == "load_mcp_tools":
+        loaded = ctx.setdefault("loaded_mcp", set())
+        if not isinstance(loaded, set):
+            loaded = set(loaded); ctx["loaded_mcp"] = loaded
+        found = []
+        for n in args.get("names") or []:
+            if mcp_hub._schema_for_full(n):
+                loaded.add(n); found.append(n)
+        if not found:
+            return ("Keine dieser MCP-Werkzeuge gefunden. Mit search_mcp_tools die korrekten "
+                    "Namen mcp__<server>__<tool> ermitteln.")
+        return "Geladen — jetzt direkt aufrufbar: " + ", ".join(found)
+
     if name == "describe_skill":
         s = skills.get(args.get("name") or "")
         if not s:
-            return "Unbekanntes Skill."
+            rest = [x["name"] for x in skills.list_all()]
+            return ("Es gibt kein Skill mit diesem Namen (evtl. gelöscht). "
+                    + ("Vorhandene Skills: " + ", ".join(rest) if rest else "Es gibt aktuell keine Skills."))
         return (f"Skill {s['name']} (v{s.get('version', 1)}, Läufe {s.get('run_count', 0)}, "
                 f"Netz {s.get('net')}):\n{s['description']}\nParameter: {s.get('params') or {}}\nCode:\n{s['code']}")
 
     if name == "update_skill":
         s = skills.get(args.get("name") or "")
         if not s:
-            return "Unbekanntes Skill."
+            rest = [x["name"] for x in skills.list_all()]
+            return ("Es gibt kein Skill mit diesem Namen zum Ändern (evtl. gelöscht). "
+                    + ("Vorhandene Skills: " + ", ".join(rest) + ". " if rest else "Es gibt aktuell keine Skills. ")
+                    + "Lege es bei Bedarf mit create_skill neu an.")
         has_deps = bool(args.get("apt") or args.get("pip") or s.get("apt") or s.get("pip"))
         if args.get("code"):
             if args.get("test_args") is not None:             # mit Beispiel-Args → echter Funktionstest
@@ -826,7 +1284,28 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
         return f"Skill „{s['name']}“ aktualisiert."
 
     if name == "delete_skill":
-        return "Skill gelöscht." if skills.delete(args.get("name") or "") else "Unbekanntes Skill."
+        wanted = args.get("name") or ""
+        ok = skills.delete(wanted)
+        rest = [s["name"] for s in skills.list_all()]
+        rest_line = ("Aktuell vorhandene Skills: " + ", ".join(rest)) if rest else "Es gibt jetzt keine Skills mehr."
+        if ok:
+            return (f"Skill „{skills.sanitize_name(wanted)}“ wurde gelöscht. {rest_line} "
+                    "Die Löschung ist erledigt — bestätige sie dem Nutzer und rufe delete_skill NICHT erneut auf.")
+        # Schon weg / nie da: idempotent klar machen, damit das Modell nicht erneut löscht oder das Gegenteil behauptet.
+        return (f"Es gibt kein Skill namens „{skills.sanitize_name(wanted)}“ — es ist bereits gelöscht bzw. existiert "
+                f"nicht. {rest_line} Behandle das als erledigt; behaupte NICHT, das Skill sei noch vorhanden.")
+
+    if name == "repair_skill":
+        return await repair_skill_impl(args.get("name") or "", ctx.get("cfg") or config.get())
+
+    if name == "spawn_subagent":
+        import subagent
+        if not subagent.can_spawn(ctx):
+            return "Verschachtelte Teil-Agenten sind nicht erlaubt — erledige die Aufgabe direkt."
+        task = (args.get("task") or "").strip()
+        if not task:
+            return "Fehler: keine Aufgabe für den Teil-Agenten angegeben."
+        return await subagent.run_subagent(task, ctx)
 
     if name == "list_automations":
         items = automations.manager.list(ctx.get("user_id"))
@@ -988,6 +1467,21 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
         n = int(args.get("max_results", 5) or 5)
         return await asyncio.to_thread(_web_search, query, n)
 
+    if name == "save_note":
+        if not ctx.get("username"):
+            return ("Ich weiß nicht, in wessen Obsidian-Vault ich speichern soll — dafür müsstest du als "
+                    "erkannter Nutzer angemeldet sein (Stimme/Telegram/Login).")
+        ok, msg = await asyncio.to_thread(obsidian.save_note, ctx.get("username"),
+                                          args.get("text") or "", args.get("title"), ctx["cfg"])
+        return msg
+
+    if name in _CALENDAR_TOOLS:
+        uid = ctx.get("user_id")
+        if not uid:
+            return ("Kalender sind pro Nutzer — dafür müsstest du als erkannter Nutzer angemeldet sein "
+                    "(Stimme/Telegram/Login).")
+        return await asyncio.to_thread(_calendar_dispatch, name, args, ctx, uid)
+
     if name == "save_memory":
         fact = (args.get("fact") or "").strip()
         if not fact:
@@ -1143,6 +1637,21 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
             return "Keine passenden Stellen in der Wissensbasis gefunden."
         return "\n".join(f"[{h['source']}] {h['content']}" for h in hits)
 
+    if name == "recall_conversation":
+        query = (args.get("query") or "").strip()
+        if not query:
+            return "Fehler: Keine Suchanfrage."
+        if ns == "guest":
+            return "Für nicht erkannte Gäste gibt es kein sitzungsübergreifendes Gesprächsgedächtnis."
+        try:
+            hits = await asyncio.to_thread(knowledge.recall_conversation, ctx["cfg"], query, ns)
+        except Exception as e:
+            return f"Gesprächs-Recall fehlgeschlagen: {e}"
+        if not hits:
+            return "Dazu finde ich kein früheres Gespräch."
+        return "Frühere Gespräche dazu:\n" + "\n---\n".join(
+            f"(Relevanz {h['score']:.2f}) {h['content']}" for h in hits)
+
     return f"Unbekanntes Tool: {name}"
 
 
@@ -1188,12 +1697,18 @@ def _fetch_url(url: str, max_chars: int = 4000) -> str:
         html = raw.decode(r.encoding or "utf-8", "replace")
     except Exception as e:
         return f"Abruf fehlgeschlagen: {e}"
-    # Quelltext/JSON/Plaintext (kein HTML/XML) → ROH & vollständig zurückgeben (bis 50k),
-    # damit das LLM z.B. eine index.js komplett lesen kann statt zu raten.
+    # Quelltext/JSON/Plaintext (kein HTML/XML) → ROH zurückgeben, aber kontext-sicher kappen.
+    # ACHTUNG: zu große Ergebnisse sprengen das Kontextfenster des LLM (llama.cpp wirft dann
+    # HTTP 400 exceed_context_size_error → Turn endet ohne Antwort). Default ~20k Zeichen
+    # (~7k Tokens) lässt genug Platz für System-Prompt, Tool-Schemas und Verlauf.
     if "html" not in ctype and "xml" not in ctype:
-        LIM = 50000
-        return (f"Quelle: {url} ({ctype})\n\n" + html[:LIM]
-                + (f"\n…[gekürzt — {len(html)} Zeichen gesamt]" if len(html) > LIM else ""))
+        LIM = int(config.get().get("fetch_max_chars", 20000))
+        if len(html) > LIM:
+            return (f"Quelle: {url} ({ctype})\n\n" + html[:LIM]
+                    + f"\n\n…[GEKÜRZT — nur die ersten {LIM} von {len(html)} Zeichen. "
+                      "Die Datei ist zu groß fürs Kontextfenster. Beantworte die Frage mit dem "
+                      "sichtbaren Teil; falls das Gesuchte fehlt, sag das offen — rate nicht.]")
+        return f"Quelle: {url} ({ctype})\n\n" + html
     try:
         from lxml import html as lxml_html
         doc = lxml_html.fromstring(html)

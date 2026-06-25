@@ -205,12 +205,27 @@ def get(name: str) -> dict | None:
     return _by_name(name)
 
 
+def clear_health(name: str) -> None:
+    """Fehlerzähler/letzten Fehler zurücksetzen (z.B. nach einer Reparatur)."""
+    s = _by_name(name)
+    if s:
+        s["fail_count"], s["last_error"] = 0, None
+        _save()
+
+
 def list_all() -> list[dict]:
     return sorted(_items.values(), key=lambda s: s["name"])
 
 
 def all_enabled() -> list[dict]:
     return [s for s in list_all() if s.get("enabled")]
+
+
+def unhealthy(threshold: int = 3) -> list[dict]:
+    """Skills, die zuletzt wiederholt scheiterten (fail_count ≥ threshold) und einen Fehler hinterlegt haben.
+    Grundlage für Selbst-Reparatur (Phase 2)."""
+    return [s for s in list_all()
+            if s.get("enabled") and s.get("fail_count", 0) >= threshold and s.get("last_error")]
 
 
 def search(query: str) -> list[dict]:

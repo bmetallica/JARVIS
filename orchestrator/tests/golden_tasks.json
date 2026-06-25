@@ -1,0 +1,14 @@
+{
+  "_comment": "Golden-Tasks für die Tool-Auswahl-Bewertung (#1). Jede Aufgabe nennt die Nutzer-Äußerung und die akzeptablen ERSTEN Tool-Aufrufe (Familie). 'expect_no_tool' = das Modell soll direkt antworten. 'requires' = Aufgabe nur werten, wenn Voraussetzung erfüllt (z.B. mcp-Server konfiguriert). Erweitere diese Liste, wenn neue Tools/Skills dazukommen — so werden Regressionen messbar statt anekdotisch.",
+  "tasks": [
+    {"message": "Hol mir die aktuellen Schlagzeilen von tagesschau.de", "expect_any_of": ["fetch_url"]},
+    {"message": "Stell bitte einen Timer auf 10 Minuten", "expect_any_of": ["set_timer"]},
+    {"message": "Welche Timer laufen gerade?", "expect_any_of": ["list_timers"]},
+    {"message": "Suche im Internet nach dem Wetter in Kiel für morgen", "expect_any_of": ["web_search", "research", "fetch_url"]},
+    {"message": "Welche meiner Server brauchen Updates?", "expect_any_of": ["search_skills", "run_skill", "load_skills"], "note": "DPM-Domäne → Skills, nicht Smart-Home"},
+    {"message": "Mach einen Screenshot von meinem Rechner", "expect_any_of": ["client_screenshot", "client_action", "list_client_capabilities"]},
+    {"message": "Baue mir ein Skill, das die Festplattenauslastung ausliest", "expect_any_of": ["create_skill"]},
+    {"message": "Schalte das Licht im Wohnzimmer ein", "expect_any_of": ["search_mcp_tools", "load_mcp_tools"], "requires": "mcp", "note": "Smart-Home ist deferred → erst MCP-Tool laden"},
+    {"message": "Wie spät ist es?", "expect_no_tool": true, "note": "Zeit steht im System-Prompt → kein Tool nötig"}
+  ]
+}

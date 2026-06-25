@@ -147,6 +147,79 @@ def tool_schemas() -> list[dict]:
     return out
 
 
+# ── Deferred Loading (#7): Katalog statt aller Schemas ───────────────────────
+# Wie bei den Skills werden MCP-Tools NICHT mehr alle als Schema eingeblendet (das blähte den
+# Prompt z.B. um 27 Domoticz-Tools und verschärfte die Tool-Verwechslung). Stattdessen: kompakter
+# Katalog im System-Prompt + Meta-Tools search_mcp_tools/load_mcp_tools, die nur die gebrauchten
+# Tools on demand sichtbar machen.
+
+def has_servers() -> bool:
+    """Gibt es überhaupt aktive MCP-Server mit Tools? (für die Denk-Heuristik)."""
+    return any(info.get("enabled") and info.get("tools") for info in _cache.values())
+
+
+def catalog_hint() -> str:
+    """Kompakter Katalog aller aktiven MCP-Server + Tools (Name+Kurzzweck) für den System-Prompt."""
+    blocks = []
+    for server, info in _cache.items():
+        if not info.get("enabled") or not info.get("tools"):
+            continue
+        names = ", ".join(t["name"] for t in info["tools"][:40])
+        blocks.append(f"- {server}: {names}")
+    if not blocks:
+        return ""
+    return ("\n\nEXTERNE MCP-WERKZEUGE (z.B. Smart-Home): NICHT direkt aufrufbar — erst mit "
+            "`load_mcp_tools(['mcp__<server>__<tool>', …])` laden (oder `search_mcp_tools(query)` zum Finden), "
+            "dann das geladene `mcp__<server>__<tool>` aufrufen. Verfügbare Server/Tools:\n" + "\n".join(blocks))
+
+
+def search(query: str) -> list[dict]:
+    """MCP-Tools nach Stichwort suchen → [{full_name, server, description}]."""
+    q = (query or "").strip().lower()
+    out = []
+    for server, info in _cache.items():
+        if not info.get("enabled"):
+            continue
+        for t in info.get("tools", []):
+            full = f"mcp__{server}__{t['name']}"
+            hay = (full + " " + (t.get("description") or "")).lower()
+            if not q or q in hay:
+                out.append({"full_name": full, "server": server,
+                            "description": (t.get("description") or "")[:160]})
+    return out
+
+
+def _schema_for_full(full_name: str) -> dict | None:
+    """OpenAI-Function-Schema für EIN MCP-Tool anhand seines vollen Namens mcp__<server>__<tool>."""
+    if not full_name.startswith("mcp__") or full_name.count("__") < 2:
+        return None
+    _, server, tool = full_name.split("__", 2)
+    info = _cache.get(server)
+    if not info or not info.get("enabled"):
+        return None
+    for t in info.get("tools", []):
+        if t["name"] == tool:
+            return {
+                "type": "function",
+                "function": {
+                    "name": full_name,
+                    "description": f"[{server}] {t['description']}"[:1024],
+                    "parameters": t.get("inputSchema") or {"type": "object", "properties": {}},
+                },
+            }
+    return None
+
+
+def schemas_for(names) -> list[dict]:
+    """Schemas der per load_mcp_tools geladenen MCP-Tools (für den Tool-Loop)."""
+    out = []
+    for n in names or []:
+        s = _schema_for_full(n)
+        if s:
+            out.append(s)
+    return out
+
+
 def server_resources() -> list[str]:
     """Ressourcen-Namen fürs Rechtesystem (mcp:<server>)."""
     init()

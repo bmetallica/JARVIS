@@ -77,7 +77,11 @@ llama-swap ein Modell erst laden muss.
 
 ---
 
-## 5. 🟡 Kontext-/Ergebnisgröße sprengt das Fenster  `[teilweise]`
+## 5. 🟡 Kontext-/Ergebnisgröße sprengt das Fenster  `[teilweise — Token-Budget 2026-06-24]`
+> Neu: `context_budget.py` budgetiert den GESAMT-Prompt gegen `llm_ctx` und trimmt+fasst alte Turns
+> rollierend zusammen; `fetch_url`/Tool-Ergebnisse zusätzlich kontext-sicher gekappt. Siehe
+> `orchestrator/CHANGES-2026-06-24.md` #3.
+
 **Symptom (real):** Ein Skill lieferte die volle Serverliste (~40 000 Zeichen) → früher Abbruch („kein
 Ergebnis", stdout-Kappung); große Tool-Ergebnisse blähen den Kontext und verwirren das Modell.
 
@@ -120,7 +124,11 @@ vorhandenen 24 GB passt.** 2×3060 (24 GB) tragen via **Tensor-Parallelismus (vL
 
 ---
 
-## 8. 🟡 „Halluzinierter Erfolg" & selbstbewusste Fehl-Antworten  `[teilweise]`
+## 8. 🟡 „Halluzinierter Erfolg" & selbstbewusste Fehl-Antworten  `[teilweise — Verify-by-Tool 2026-06-24]`
+> Neu: Erfolgsbehauptungen ohne geglückten Side-Effect-Tool-Aufruf werden erkannt und als
+> `unverified_claim` geloggt/gemessen (`/api/admin/metrics`); Prompt-Regel verschärft. Siehe
+> `orchestrator/CHANGES-2026-06-24.md` #10.
+
 **Symptom (real):** Modell behauptete „per Telegram gesendet/Skill erstellt", ohne das Werkzeug zu nutzen;
 bzw. „Abfrage fehlgeschlagen, prüfe die Verbindung", obwohl es nur das falsche Tool genommen hatte.
 
@@ -134,7 +142,11 @@ bzw. „Abfrage fehlgeschlagen, prüfe die Verbindung", obwohl es nur das falsch
 
 ---
 
-## 9. 🟡 Architektur: alle Tool-Kategorien sind dauerhaft „an"  `[offen]`
+## 9. 🟡 Architektur: alle Tool-Kategorien sind dauerhaft „an"  `[teilweise — MCP erledigt 2026-06-24]`
+> Client-Aktionen & Automationen waren bereits deferred (kompakte Meta-Tools). **MCP** ist seit
+> 2026-06-24 ebenfalls deferred (Katalog + `search_mcp_tools`/`load_mcp_tools`), siehe
+> `orchestrator/CHANGES-2026-06-24.md` #7. Damit ist der größte Schema-Bloat weg.
+
 Interne Tools + MCP + Client-Aktionen + Skills sind gleichzeitig im Schema. Das verteuert jeden Turn (Tokens)
 und verschärft Punkt 1.
 **Lösung ohne Hardware:** Das **Deferred-Loading der Skills generalisieren** (Katalog + `search/load`-Meta-
@@ -168,6 +180,10 @@ autonom, Code-Änderung resettet Rechte.
 ---
 
 ## 13. 🟢 Voice-Satellit: Wake-Word & Dual-Mic  `[offen]`
+> Teil-Fortschritt 2026-06-24: **Barge-in (Abbruch)** end-to-end vorhanden (Cancel-Registry +
+> `POST /api/chat/cancel` + WS `cancel`; Frontend-Hook). Echtes Streaming-STT/AEC steht noch aus
+> (GPU-seitiger Streaming-ASR). Siehe `orchestrator/CHANGES-2026-06-24.md` #12.
+
 Wake-Word reagiert mäßig; 2-Mic-BSS kann das WakeNet-Signal verschlechtern (siehe ESP-Notizen).
 **Lösungen ohne Hardware:** Mono testen (`JARVIS_DUAL_MIC 0`), Mic-Gain/Empfindlichkeit justieren (remote),
 ggf. anderes Wake-Modell. Barge-In (AEC) nur Mono, da CPU-begrenzt.

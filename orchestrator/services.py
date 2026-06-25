@@ -41,6 +41,7 @@ def chat(messages: list[dict], cfg: dict) -> str:
         "messages":   messages,
         "stream":     False,
         "max_tokens": int(cfg.get("llm_max_tokens", 1024)),
+        "cache_prompt": bool(cfg.get("llm_cache_prompt", True)),
     }
     resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=timeout)
     resp.raise_for_status()
@@ -70,6 +71,7 @@ def vision_call(prompt: str, image_url: str, cfg: dict, timeout: int = 150) -> s
         ]}],
         "stream": False,
         "max_tokens": int(cfg.get("llm_max_tokens", 1024)),
+        "cache_prompt": bool(cfg.get("llm_cache_prompt", True)),
     }
     resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=timeout)
     resp.raise_for_status()
@@ -101,6 +103,25 @@ def _post_llm(url: str, payload: dict, timeout: int, stream: bool = False):
                     pass
                 _t.sleep(1.5 * (attempt + 1))
                 continue
+            if r.status_code >= 400:                       # 4xx (NICHT transient) → Server-Detail mitnehmen
+                detail = ""
+                try:
+                    body = r.json()
+                    err = body.get("error", body) if isinstance(body, dict) else {}
+                    if (err or {}).get("type") == "exceed_context_size_error":
+                        n_prompt = err.get("n_prompt_tokens"); n_ctx = err.get("n_ctx")
+                        detail = (f": Die Anfrage ist zu groß fürs Kontextfenster "
+                                  f"({n_prompt} > {n_ctx} Tokens). Bitte kürzer fassen "
+                                  "oder weniger/kleinere Werkzeug-Ergebnisse einbeziehen.")
+                    else:
+                        detail = ": " + str((err or {}).get("message", ""))[:200]
+                except Exception:
+                    pass
+                try:
+                    r.close()
+                except Exception:
+                    pass
+                raise requests.exceptions.HTTPError(f"{r.status_code} {r.reason}{detail}")
             return r
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             last = e
@@ -122,6 +143,7 @@ def llm_call(messages: list[dict], cfg: dict, tools: list | None = None, think: 
         "stream":     False,
         "max_tokens": int(cfg.get("llm_max_tokens", 1024)),
         "chat_template_kwargs": _thinking_kwargs(cfg, think),
+        "cache_prompt": bool(cfg.get("llm_cache_prompt", True)),
     }
     _fp = float(cfg.get("llm_frequency_penalty", 0.3))   # gegen Wiederholungs-/Tool-Schleifen
     if _fp:
@@ -200,6 +222,7 @@ def llm_stream(messages: list[dict], cfg: dict, tools: list | None = None, think
         "stream":     True,
         "max_tokens": int(cfg.get("llm_max_tokens", 1024)),
         "chat_template_kwargs": _thinking_kwargs(cfg, think),
+        "cache_prompt": bool(cfg.get("llm_cache_prompt", True)),
     }
     _fp = float(cfg.get("llm_frequency_penalty", 0.3))   # gegen Wiederholungs-/Tool-Schleifen
     if _fp:
