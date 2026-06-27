@@ -30,7 +30,8 @@ _seq = 0
 _LOG_DIR = Path(os.environ.get("JARVIS_LOG_DIR", Path(__file__).resolve().parent / "logs"))
 # Nur wirklich aussagekräftige Ereignisse persistieren (kein Rauschen, kein PII-Volltext der Audios).
 _PERSIST_KINDS = {"turn", "turn_done", "llm_error", "retry", "tool", "tool_loop_abort",
-                  "automation_done", "llm_502", "context_trim", "unverified_claim"}
+                  "automation_done", "llm_502", "context_trim", "unverified_claim",
+                  "mcp_startup", "mcp_refresh", "mcp_refresh_error", "startup_error", "smarthome_hint"}
 
 # Felder, die Nutzer-Inhalte enthalten — bei aktivem log_redact aus den JSONL-Logs entfernt
 # (es bleibt nur die Länge erhalten, damit Diagnose ohne Klartext möglich ist).

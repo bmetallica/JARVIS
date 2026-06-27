@@ -75,13 +75,20 @@ _DEFAULTS: dict = {
     "profile_enabled": True,         # rollierendes Nutzerprofil pflegen + in den Prompt einblenden
     "profile_min_interval_s": 180,   # Profil je Nutzer höchstens alle N Sekunden neu generieren (restart-robust)
 
+    # ── Plugin-Gateway (/api/v1/*) — CORS für Browser-PWAs auf anderem Origin ─────
+    # Liste erlaubter Origins (Schema+Host+Port), z.B. ["http://192.168.66.224:8096"].
+    # "*" = jeden Origin erlauben (ok, da das Gateway Bearer-Keys nutzt, keine Cookies).
+    # Origins registrierter Plugins (manifest.ui.entry) werden ZUSÄTZLICH automatisch erlaubt.
+    "plugin_cors_origins": ["*"],
+
     # ── Kalender ─────────────────────────────────────────────────────────────────
     "calendar_enabled": True,
     "calendar_base_url": "https://192.168.66.224:8088",   # Basis für iCal-Abo-Links (nur LAN)
 
     # ── Obsidian-Notizen (pro Nutzer eine Vault) ─────────────────────────────────
     "obsidian_enabled": True,
-    "obsidian_inbox": "Inbox.md",    # Datei (relativ zur Vault), in die kurze Notizen angehängt werden
+    "obsidian_note_mode": "file",    # "file" = jede Notiz eine eigene Datei (auto-Titel) | "inbox" = Bullets in einer Sammeldatei
+    "obsidian_inbox": "Inbox.md",    # Sammeldatei nur im Modus "inbox"
     "obsidian_autolink": True,       # neue Notizen automatisch per [[Wikilinks]] zu Themen/Notizen verbinden
     "obsidian_autolink_max": 4,      # höchstens so viele automatische Links pro Notiz
     # Zuordnung JARVIS-Nutzername (klein) → absoluter Vault-Pfad auf dem Host.

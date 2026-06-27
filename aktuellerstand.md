@@ -7,6 +7,12 @@
 > Gedächtnis-Fixes und 5 größere Verbesserungen (persistenter Verlauf, Token-Budget, Observability,
 > MCP Deferred-Loading, Eval-Harness) — Details: [`orchestrator/CHANGES-2026-06-24.md`](./orchestrator/CHANGES-2026-06-24.md).
 > Agenten-Modell ist jetzt **qwen3-14b @ ctx 40960** (gemma4-12b = Vision).
+>
+> **Update 2026-06-25:** **Pluginsystem** implementiert & getestet — versioniertes Gateway `/api/v1/*`
+> (LLM/Vision/STT/TTS/RAG/Storage/Notify/Tools/Scheduler/Event-WS) mit Plugin-API-Keys + Scopes,
+> Plugin-Registry/Admin-UI-Endpunkten, KV-Store und Event-Bus. Module: `api_v1.py`, `plugins_registry.py`,
+> `plugin_bus.py`. Plan/Doku: [`pluginsystem.md`](./pluginsystem.md), Template: `deploy/plugin-example/`.
+> Erstes Ziel-Plugin: ADHS-Family-Helper (extern/PWA).
 
 ## Überblick
 Aus der Windows-App **Mark-XL** wird **SH-Jarvis**, ein verteiltes, deutschsprachiges KI-Ökosystem.

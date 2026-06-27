@@ -73,6 +73,7 @@ async function loadAdmin() {
     await loadUsers();
     await loadConfig();
     await loadMcp();
+    await loadPlugins();
     await loadDebug();
     await loadDevices();
     await loadAutomations();
@@ -233,20 +234,42 @@ $("btn-cal-list").onclick = async () => {
 
 // ── MCP-Server ────────────────────────────────────────────────────────────────
 async function loadMcp() {
-    const servers = (await api("GET", "/api/admin/mcp")).servers;
+    const data = await api("GET", "/api/admin/mcp");
+    const servers = data.servers, defKw = (data.default_keywords || []).join(", ");
     const el = $("mcps"); el.innerHTML = "";
     if (!servers.length) el.innerHTML = '<p class="muted">Noch keine MCP-Server.</p>';
     for (const s of servers) {
         const div = document.createElement("div"); div.className = "item";
         const status = s.error ? `<span class="tag" style="background:var(--bad);color:#fff">Fehler</span>`
                                : `<span class="tag" style="background:var(--ok);color:#04141b">${s.tool_count} Tools</span>`;
+        const kwVal = (s.accel_keywords || "").replace(/"/g, "&quot;");
+        const ph = s.accel_default ? "Standardliste aktiv — eigene Stichwörter (kommagetrennt) überschreiben sie" : "";
+        const warn = s.has_device_search ? ""
+            : ' <span style="color:var(--bad)">⚠ kein Geräte-Such-Tool erkannt → Beschleunigung inaktiv</span>';
         div.innerHTML = `<div class="head"><span class="name">${s.name} ${status}</span>
             <button class="small danger" data-delm="${s.name}">Entfernen</button></div>
-            <div class="muted" style="font-size:11px">${s.url}${s.error ? " — " + s.error : ""}</div>`;
+            <div class="muted" style="font-size:11px">${s.url}${s.error ? " — " + s.error : ""}</div>
+            <div class="row" style="margin-top:6px">
+              <input class="kw-input" data-kw="${s.name}" value="${kwVal}" placeholder="${ph}" style="flex:1">
+              <button class="small" data-savekw="${s.name}">⚡ Stichwörter</button>
+              <button class="small secondary" data-defkw="${s.name}">↺ Standard</button>
+            </div>
+            <div class="muted" style="font-size:11px">Beschleunigungs-Stichwörter (Vorab-Geräteauflösung → schnellere Antworten).
+              Leer = Standardliste.${warn}
+              <details><summary>Standardliste anzeigen</summary><code style="font-size:10px">${defKw}</code></details></div>`;
         el.appendChild(div);
     }
     el.querySelectorAll("[data-delm]").forEach((b) => b.onclick = async () => {
         if (confirm("MCP-Server entfernen?")) { await api("POST", "/api/admin/mcp/delete", { name: b.dataset.delm }); await loadAdmin(); }
+    });
+    el.querySelectorAll("[data-savekw]").forEach((b) => b.onclick = async () => {
+        const inp = el.querySelector(`.kw-input[data-kw="${CSS.escape(b.dataset.savekw)}"]`);
+        await api("POST", "/api/admin/mcp/keywords", { name: b.dataset.savekw, keywords: inp.value });
+        await loadMcp();
+    });
+    el.querySelectorAll("[data-defkw]").forEach((b) => b.onclick = async () => {
+        await api("POST", "/api/admin/mcp/keywords", { name: b.dataset.defkw, keywords: "" });
+        await loadMcp();
     });
 }
 
@@ -257,6 +280,114 @@ $("btn-add-mcp").onclick = async () => {
     catch (e) { alert(e.message); }
 };
 $("btn-refresh-mcp").onclick = async () => { await api("POST", "/api/admin/mcp/refresh"); await loadAdmin(); };
+
+// ── Plugins (Gateway /api/v1/*) ────────────────────────────────────────────────
+let PLUGIN_META = { api_scopes: [], tool_resources: [], mcp_resources: [] };
+
+async function loadPlugins() {
+    const data = await api("GET", "/api/admin/plugins");
+    PLUGIN_META = data;
+    const el = $("plugins"); el.innerHTML = "";
+    if (!data.plugins.length) el.innerHTML = '<p class="muted">Noch keine Plugins registriert.</p>';
+    for (const p of data.plugins) {
+        const div = document.createElement("div"); div.className = "item";
+        const badge = p.enabled ? `<span class="tag" style="background:var(--ok);color:#04141b">aktiv</span>`
+                                : `<span class="tag" style="background:var(--bad);color:#fff">aus</span>`;
+        div.innerHTML = `<div class="head"><span class="name">${p.name} <code>${p.id}</code>
+              <span class="muted" style="font-size:11px">v${p.version} · ${p.type} · ${p.active_keys} Key(s)</span> ${badge}</span>
+            <span>
+              <button class="small secondary" data-keys="${p.id}">🔑 Keys</button>
+              <button class="small" data-tog="${p.id}">${p.enabled ? "Deaktivieren" : "Aktivieren"}</button>
+              <button class="small danger" data-delp="${p.id}">Löschen</button>
+            </span></div>
+            <div class="keys hidden" id="keys-${p.id}" data-open="0"></div>`;
+        el.appendChild(div);
+    }
+    el.querySelectorAll("[data-tog]").forEach((b) => b.onclick = async () => {
+        const p = data.plugins.find((x) => x.id === b.dataset.tog);
+        await api("POST", "/api/admin/plugins/enable", { id: b.dataset.tog, enabled: !p.enabled });
+        await loadPlugins();
+    });
+    el.querySelectorAll("[data-delp]").forEach((b) => b.onclick = async () => {
+        if (confirm(`Plugin „${b.dataset.delp}" inkl. aller Keys und gespeicherten Daten löschen?`)) {
+            await api("POST", "/api/admin/plugins/delete", { id: b.dataset.delp }); await loadPlugins();
+        }
+    });
+    el.querySelectorAll("[data-keys]").forEach((b) => b.onclick = () => toggleKeys(b.dataset.keys));
+}
+
+function toggleKeys(pid) {
+    const box = $("keys-" + pid);
+    if (box.dataset.open === "1") { box.dataset.open = "0"; box.classList.add("hidden"); box.innerHTML = ""; }
+    else { box.dataset.open = "1"; box.classList.remove("hidden"); drawKeys(pid); }
+}
+
+async function drawKeys(pid) {
+    const box = $("keys-" + pid);
+    const keys = (await api("GET", `/api/admin/plugins/${pid}/keys`)).keys;
+    const scopes = [...PLUGIN_META.api_scopes, ...PLUGIN_META.tool_resources, ...PLUGIN_META.mcp_resources];
+    const scopeBoxes = scopes.map((s) =>
+        `<label style="display:inline-block;margin:0 8px 2px 0;white-space:nowrap">
+            <input type="checkbox" class="sc-${pid}" value="${s}">${s}</label>`).join("");
+    const list = keys.length ? keys.map((k) =>
+        `<div class="muted" style="font-size:11px;margin:2px 0">
+            <code>${k.kid}</code>${k.label ? " · " + k.label : ""}
+            ${k.revoked ? '· <span style="color:var(--bad)">widerrufen</span>' : ""}
+            · ${k.scopes.length} Scopes${k.user_binding ? " · Nutzer #" + k.user_binding : ""}
+            ${k.last_used ? " · zuletzt " + k.last_used.slice(0, 16) : ""}
+            ${k.revoked ? "" : `<button class="small danger" data-revoke="${k.kid}">Widerrufen</button>`}
+        </div>`).join("") : '<p class="muted" style="font-size:11px">Noch keine Keys.</p>';
+    box.innerHTML = `${list}
+        <details style="margin-top:6px"><summary class="muted" style="font-size:12px">➕ Neuen API-Key erzeugen</summary>
+          <div class="row" style="margin-top:6px">
+            <input id="key-label-${pid}" placeholder="Label (z. B. pwa)" style="max-width:160px">
+            <input id="key-user-${pid}" placeholder="Nutzer binden (optional)" style="max-width:200px">
+          </div>
+          <div style="margin:6px 0;line-height:1.9">${scopeBoxes}</div>
+          <button class="small" data-createkey="${pid}">Key erstellen</button>
+          <div id="key-out-${pid}" style="font-size:12px;word-break:break-all;margin-top:6px"></div>
+        </details>`;
+    box.querySelectorAll("[data-revoke]").forEach((b) => b.onclick = async () => {
+        if (confirm("Key widerrufen? Das Plugin verliert sofort den Zugriff.")) {
+            await api("POST", "/api/admin/plugins/keys/revoke", { kid: b.dataset.revoke }); await drawKeys(pid);
+        }
+    });
+    box.querySelector("[data-createkey]").onclick = async () => {
+        const scopesSel = [...box.querySelectorAll(".sc-" + pid + ":checked")].map((c) => c.value);
+        if (!scopesSel.length) { alert("Mindestens einen Scope wählen."); return; }
+        const body = { label: $("key-label-" + pid).value.trim(), scopes: scopesSel };
+        const u = $("key-user-" + pid).value.trim(); if (u) body.user = u;
+        try {
+            const r = await api("POST", `/api/admin/plugins/${pid}/keys`, body);
+            $("key-out-" + pid).innerHTML =
+                `<b style="color:var(--ok)">Token — JETZT kopieren, wird nur einmal angezeigt:</b><br>
+                 <code>${r.token}</code>`;
+        } catch (e) { alert(e.message); }
+    };
+}
+
+function pluginStatus(msg, ok = true) {
+    const s = $("plugin-status"); if (!s) return;
+    s.textContent = msg; s.style.color = ok ? "var(--ok)" : "var(--bad)";
+    setTimeout(() => { if (s.textContent === msg) s.textContent = ""; }, 4000);
+}
+
+$("btn-add-plugin").onclick = async () => {
+    const id = $("new-plugin-id").value.trim(), name = $("new-plugin-name").value.trim();
+    if (!id) { alert("id nötig."); return; }
+    try {
+        const r = await api("POST", "/api/admin/plugins", { id, name: name || id, version: "1.0.0", type: "external" });
+        $("new-plugin-id").value = ""; $("new-plugin-name").value = "";
+        await loadPlugins();
+        pluginStatus(`✓ Plugin „${r.plugin.id}" registriert — jetzt unten 🔑 Keys erzeugen.`);
+    } catch (e) { pluginStatus(e.message, false); alert(e.message); }
+};
+$("btn-add-plugin-json").onclick = async () => {
+    let manifest; try { manifest = JSON.parse($("new-plugin-json").value); }
+    catch { alert("Ungültiges JSON."); return; }
+    try { await api("POST", "/api/admin/plugins", manifest); $("new-plugin-json").value = ""; await loadPlugins(); }
+    catch (e) { alert(e.message); }
+};
 
 // ── Debug ─────────────────────────────────────────────────────────────────────
 function fmtEvent(e) {

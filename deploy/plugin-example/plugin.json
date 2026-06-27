@@ -1,0 +1,19 @@
+{
+  "id": "adhs",
+  "name": "ADHS-Family-Helper",
+  "version": "1.0.0",
+  "type": "external",
+  "description": "Neurodiverses Familien-Assistenzsystem (PWA) — kooperatives Tamagotchi, Mikro-Tasks, RAG-Tagebuch.",
+  "author": "",
+  "scopes_requested": [
+    "api:llm", "api:vision", "api:stt", "api:tts", "api:rag",
+    "api:storage", "api:notify", "api:events", "api:scheduler",
+    "api:act_as_user", "tool:set_timer", "tool:add_todo"
+  ],
+  "events_published": ["gamification/xp", "timer/tick", "daily_reset"],
+  "events_subscribed": ["jarvis/core/device_connected", "jarvis/core/timer_elapsed"],
+  "storage_collections": ["tamagotchi", "tasks", "profiles"],
+  "rag_collections": ["adhs_family_logs"],
+  "webhook_url": "",
+  "ui": { "entry": "https://adhs.local/", "icon": "🧩", "embed_in_admin": false }
+}

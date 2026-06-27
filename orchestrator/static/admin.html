@@ -51,6 +51,7 @@
                 <button class="navbtn" data-tab="users">👤 Nutzer</button>
                 <button class="navbtn" data-tab="groups">🛡 Gruppen &amp; Rechte</button>
                 <button class="navbtn" data-tab="mcp">🔌 MCP-Server</button>
+                <button class="navbtn" data-tab="plugins">🧩 Plugins</button>
                 <button class="navbtn" data-tab="devices">📡 Geräte</button>
                 <button class="navbtn" data-tab="autonomy">🤖 Autonomie</button>
                 <button class="navbtn" data-tab="skills">🧰 Skills</button>
@@ -200,6 +201,30 @@
                     <button id="btn-add-mcp">Hinzufügen</button>
                     <button id="btn-refresh-mcp" class="small secondary">↻ Aktualisieren</button>
                 </div>
+            </div>
+
+            <!-- Plugins (Gateway /api/v1/*) -->
+            <div class="card tab hidden" data-tab="plugins">
+                <h2>Plugins</h2>
+                <p class="muted" style="font-size:12px">Externe Plugins (z. B. der ADHS-Helper) nutzen JARVIS über das
+                   Gateway <code>/api/v1/*</code> mit einem <b>Plugin-API-Key</b>. Wirksame Rechte = Key-Scopes
+                   <b>UND</b> die Rechte des gebundenen Nutzers. Vollständige Doku: <code>pluginsystem.md</code>,
+                   Vorlage: <code>deploy/plugin-example/</code>.</p>
+                <div id="plugins"></div>
+                <div class="row" style="margin-top:8px">
+                    <input id="new-plugin-id" placeholder="id (z. B. adhs)">
+                    <input id="new-plugin-name" placeholder="Anzeigename">
+                    <button id="btn-add-plugin">Registrieren</button>
+                    <span id="plugin-status" class="muted" style="font-size:12px;align-self:center"></span>
+                </div>
+                <details style="margin-top:6px">
+                    <summary class="muted" style="font-size:12px">…oder vollständiges <code>plugin.json</code> einfügen</summary>
+                    <div class="row" style="margin-top:6px">
+                        <textarea id="new-plugin-json" rows="4" style="flex:1"
+                                  placeholder='{"id":"adhs","name":"ADHS-Helper","version":"1.0.0","type":"external"}'></textarea>
+                    </div>
+                    <button id="btn-add-plugin-json" class="small secondary">JSON registrieren</button>
+                </details>
             </div>
 
             <!-- System / zentrale Einstellungen -->

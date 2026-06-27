@@ -62,34 +62,43 @@ def _list_note_titles(vault: Path, inbox: str, limit: int = 80) -> list[str]:
     return titles
 
 
-def _suggest_links(cfg: dict, text: str, existing: list[str], own_title: str | None) -> list[str]:
-    """Per LLM 2–4 passende Themen/Konzepte als Linkziele vorschlagen (bevorzugt vorhandene Titel)."""
+def _suggest_meta(cfg: dict, text: str, existing: list[str], own_title: str | None):
+    """Ein LLM-Aufruf → (vorgeschlagener Titel | None, [Wikilinks]). Titel nur, wenn keiner vorgegeben ist."""
     import services
     ex = ", ".join(existing[:60])
-    messages = [
-        {"role": "system", "content":
-            "Du verschlagwortest eine Notiz für ein Obsidian-Wissensnetz. Nenne 2–4 prägnante Themen/Konzepte "
-            "(Substantive), unter denen die Notiz sinnvoll einzuordnen ist, als Obsidian-Wikilinks. Bevorzuge "
-            "VORHANDENE Titel, wenn sie thematisch passen; sonst sinnvolle Oberbegriffe. Antworte AUSSCHLIESSLICH "
-            "mit den Links, z. B.: [[Obst]] [[Ernährung]]"},
-        {"role": "user", "content": f"Vorhandene Notizen/Themen: {ex or '(noch keine)'}\n\nNotiz: {text}"},
-    ]
+    need_title = not own_title
+    if need_title:
+        sysmsg = ("Du organisierst eine Notiz für ein Obsidian-Wissensnetz. Gib EXAKT zwei Zeilen zurück:\n"
+                  "Titel: <prägnant, 3–6 Wörter, kein Datum, keine Anführungszeichen>\n"
+                  "Links: 2–4 passende Themen als Obsidian-Wikilinks [[…]] (bevorzugt VORHANDENE Titel)")
+    else:
+        sysmsg = ("Du verschlagwortest eine Notiz für ein Obsidian-Wissensnetz. Antworte AUSSCHLIESSLICH mit "
+                  "2–4 passenden Themen als Obsidian-Wikilinks [[…]] (bevorzugt VORHANDENE Titel), z. B. [[Obst]] [[Ernährung]]")
     try:
-        res = services.llm_call(messages, cfg, None, False)
-        out = res.get("content", "") or ""
+        out = (services.llm_call(
+            [{"role": "system", "content": sysmsg},
+             {"role": "user", "content": f"Vorhandene Notizen/Themen: {ex or '(noch keine)'}\n\nNotiz: {text}"}],
+            cfg, None, False).get("content", "") or "")
     except Exception:
-        return []
-    links = re.findall(r"\[\[([^\]\n]{1,60})\]\]", out)
-    if not links:                          # Fallback: kommaseparierte Begriffe
-        links = [t.strip() for t in re.split(r"[,\n]", out) if 1 < len(t.strip()) <= 40]
-    seen, clean = set(), []
+        return None, []
+    title = None
+    if need_title:
+        m = re.search(r"(?im)^\s*titel\s*:\s*(.+)$", out)
+        if m:
+            title = re.sub(r'["\[\]]', "", m.group(1)).strip()[:80] or None
+    links, seen, clean = re.findall(r"\[\[([^\]\n]{1,60})\]\]", out), set(), []
     for l in links:
         l = re.sub(r"[\[\]#|^]", "", l).strip()
-        if not l or (own_title and l.lower() == own_title.lower()):
+        cmp = own_title or title or ""
+        if not l or (cmp and l.lower() == cmp.lower()) or l.lower() in seen:
             continue
-        if l.lower() not in seen:
-            seen.add(l.lower()); clean.append(l)
-    return clean[:max(0, int(cfg.get("obsidian_autolink_max", 4)))]
+        seen.add(l.lower()); clean.append(l)
+    return title, clean[:max(0, int(cfg.get("obsidian_autolink_max", 4)))]
+
+
+def _fallback_title(text: str) -> str:
+    words = re.sub(r"\s+", " ", (text or "").strip()).split()
+    return " ".join(words[:6])[:80] or "Notiz"
 
 
 def save_note(username: str | None, text: str, title: str | None = None,
@@ -110,27 +119,34 @@ def save_note(username: str | None, text: str, title: str | None = None,
         return False, f"Der hinterlegte Vault-Pfad existiert nicht: {vault_path}"
 
     inbox = (cfg.get("obsidian_inbox") or "Inbox.md")
+    mode = (cfg.get("obsidian_note_mode") or "file").lower()
+    autolink = cfg.get("obsidian_autolink", True)
 
-    # Automatische Verknüpfung: passende Themen/Notizen als [[Wikilinks]] ermitteln.
-    links = []
-    if cfg.get("obsidian_autolink", True):
-        existing = _list_note_titles(vault, inbox)
-        links = _suggest_links(cfg, text, existing, title)
+    # Ein LLM-Aufruf liefert (falls nötig) den Titel UND die Verlinkungen.
+    gen_title, links = None, []
+    if (autolink or (mode == "file" and not title)):
+        gen_title, links = _suggest_meta(cfg, text, _list_note_titles(vault, inbox), title)
+        if not autolink:
+            links = []
     link_str = " ".join(f"[[{l}]]" for l in links)
 
-    if title:
-        rel = _sanitize_title(title) + ".md"
-        target = (vault / rel).resolve()
-        body = (text if text.endswith("\n") else text + "\n")
-        if link_str:
-            body += f"\nVerwandt: {link_str}\n"
-        header = ""
-    else:
+    if mode == "inbox" and not title:                       # alter Sammel-Modus (optional)
         rel = inbox
         target = (vault / rel).resolve()
         suffix = f" {link_str}" if link_str else ""
         body = f"- [{time.strftime('%Y-%m-%d %H:%M')}] {text}{suffix}\n"
         header = "# Inbox\n\n"
+    else:                                                   # jede Notiz = eigene Datei (eigener Graph-Knoten)
+        eff_title = title or gen_title or _fallback_title(text)
+        rel = _sanitize_title(eff_title) + ".md"
+        target = (vault / rel).resolve()
+        if not title and target.exists():                  # auto-Titel: keine fremde Notiz überschreiben/anhängen
+            rel = _sanitize_title(eff_title) + " " + time.strftime("%H%M%S") + ".md"
+            target = (vault / rel).resolve()
+        body = (text if text.endswith("\n") else text + "\n")
+        if link_str:
+            body += f"\nVerwandt: {link_str}\n"
+        header = ""
 
     # Pfad-Containment: Ziel muss innerhalb der Vault liegen.
     if not str(target).startswith(str(vault) + os.sep):

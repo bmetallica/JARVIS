@@ -281,9 +281,25 @@ class AutomationManager:
 manager = AutomationManager()
 
 
+_listeners: list = []          # zusätzliche Event-Senken (z.B. Plugin-Bus), siehe add_listener
+
+
+def add_listener(fn) -> None:
+    """Callback(event:str, payload:dict) bei jedem emit() zusätzlich aufrufen.
+    Genutzt, um Core-Events in den Plugin-Event-Bus zu spiegeln (plugin_bus.forward_core_event)."""
+    if fn not in _listeners:
+        _listeners.append(fn)
+
+
 def emit(event: str, payload: dict | None = None) -> None:
     """Ereignis feuern (fire-and-forget) — sicher aus async-Kontexten aufrufbar.
-    Löst alle passenden Ereignis-Automatisierungen aus (mit Cooldown)."""
+    Löst alle passenden Ereignis-Automatisierungen aus (mit Cooldown) und
+    benachrichtigt registrierte Listener (Plugin-Bus)."""
+    for fn in _listeners:
+        try:
+            fn(event, payload or {})
+        except Exception:
+            pass
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

@@ -43,12 +43,16 @@ import messaging
 import context_budget
 import profile as user_profile
 import calendars
+import plugins_registry
+import plugin_bus
+import api_v1
 from session_hub import hub
 
 BASE_DIR   = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
 app = FastAPI(title="JARVIS Orchestrator", version="0.1.0")
+app.include_router(api_v1.router)        # Plugin-Gateway /api/v1/* (siehe pluginsystem.md)
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -277,6 +281,10 @@ _TOOL_HINT = (
     "TO-DO-LISTE: add_todo ('schreibe … auf meine To-do'; mit Datum due=YYYY-MM-DD erscheint der Punkt auch im Kalender), "
     "list_todos ('was ist auf meiner To-do'), complete_todo ('… ist erledigt' — Punkt per Ähnlichkeit finden), "
     "remove_todo, todo_link (Hardlink). "
+    "Für SEHR UMFANGREICHE, mehrstufige Teilaufgaben (viele Tool-Schritte nötig, aber nur ein kompaktes Ergebnis "
+    "erwünscht — z.B. eine Logdatei nach Fehlern durchgehen, mehrere Server prüfen und zusammenfassen, eine "
+    "Analyse über viele Zwischenschritte) spawn_subagent(task) nutzen: der Teil-Agent erledigt das eigenständig "
+    "und gibt nur das Endergebnis zurück, das hält deinen Kontext klein. Für gewöhnliche Web-Recherche genügt research. "
     "Bei Fragen zu eigenen Dokumenten/Unterlagen knowledge_search nutzen. "
     "Bezieht sich die Frage auf etwas FRÜHER Besprochenes ('was hatten wir neulich zu…'), recall_conversation nutzen. "
     "Für wiederkehrende oder geplante Aufgaben, an die JARVIS SELBSTSTÄNDIG denken soll "
@@ -313,6 +321,104 @@ _DEV_RE = re.compile(
 
 def _is_dev_request(message: str) -> bool:
     return bool(_DEV_RE.search(message or ""))
+
+
+# Smart-Home-/Gerätesteuerung: erkennt Befehle, die über den MCP-Smarthome-Server laufen sollten.
+# Solche Befehle sind mehrstufig (Tools laden → Gerät+idx finden → schalten) und brauchen Denken,
+# damit das Modell nicht auf client_action/URLs ausweicht.
+# Geräte-Nomen ohne Wortgrenze, damit deutsche Komposita matchen (Wohnzimmer*licht*, Decken*lampe*).
+_SMARTHOME_RE = re.compile(
+    r"(licht|lampe|leuchte|beleuchtung|steckdose|steckerleiste|heizung|thermostat|"
+    r"rolll?aden|rolll?äden|jalousie|rollo|markise|szene|dimm|smart-?home|hausger|"
+    r"garage|ventilator|"
+    r"strom|watt|verbrauch|zähler|energie|kwh|leistung|photovoltaik|solar|sensor)"
+    r"|\b(schalte?t?|mach[e]?)\b.*\b(an|aus|ein|ab)\b",
+    re.IGNORECASE)
+
+
+def _is_smarthome_request(message: str) -> bool:
+    return bool(_SMARTHOME_RE.search(message or ""))
+
+
+# Schaltbefehl vs. Lese-/Messfrage: Schaltbefehle dürfen den schnellen No-Think-Weg nehmen (idx ist
+# vorab aufgelöst → 1 Tool-Call, halluzinieren selten). Lese-/Messfragen brauchen Denken (sonst
+# halluzinierte das Modell „nicht erreichbar" statt den injizierten Wert zu nennen).
+_SWITCH_VERB_RE = re.compile(
+    r"\b(schalte?t?|mach[e]?|dimm\w*|stell\w*|setz\w*|öffne|schließe?|fahr\w*|kipp\w*|"
+    r"aktivier\w*|deaktivier\w*|starte|stoppe)\b", re.IGNORECASE)
+_QUESTION_RE = re.compile(
+    r"\b(wie|was|wieviel|welche\w*|wo|warum|ist|sind|hab|habe|zeig\w*|nenne|gib|liste|status|wert)\b|\?",
+    re.IGNORECASE)
+_ONOFF_RE = re.compile(r"\b(an|aus|ein|ab|hoch|runter|auf|zu)\b", re.IGNORECASE)
+
+
+def _is_switch_command(message: str) -> bool:
+    m = message or ""
+    if _SWITCH_VERB_RE.search(m):
+        return True
+    # „Wohnzimmerlicht an" — Schaltziel ohne Frage-/Lesewörter
+    return bool(_ONOFF_RE.search(m) and not _QUESTION_RE.search(m))
+
+
+_SH_STOP = {"schalte", "schalt", "schalten", "mach", "mache", "machen", "bitte", "jarvis", "das",
+            "den", "die", "der", "ein", "eine", "einen", "auf", "aus", "und", "ich", "mal", "kannst",
+            "möchte", "will", "soll", "stell", "stelle", "setz", "setze", "dimme", "dimm", "öffne",
+            "schließe", "fahre", "hoch", "runter", "etwas", "mir", "ist", "wie", "alle", "wieder"}
+
+
+async def _smarthome_device_hint(message: str, server: str, search_tool: str) -> str:
+    """Löst passende Geräte eines MCP-Servers VORAB serverseitig auf (Name→idx→Status/Messwert) und
+    gibt einen kompakten Prompt-Block zurück. So antwortet das Modell bei Mess-Fragen ohne Tool und
+    schaltet bei Befehlen direkt per `idx` — kein Such-Roundtrip, kein `name`-Fehlversuch (Haupt-Hebel
+    gegen die Latenz: MCP-Call ~90 ms, aber jede LLM-Runde kostet Sekunden)."""
+    words = [w for w in re.findall(r"[a-zäöüß]+", (message or "").lower())
+             if len(w) >= 4 and w not in _SH_STOP]
+    words.sort(key=len, reverse=True)        # längste/spezifischste zuerst (z.B. "wohnzimmerlicht")
+    seen, scored, last_err, got_exact = set(), [], None, False
+    for w in words[:4]:
+        res = None
+        for _ in range(2):                   # ein Retry: MCP-Verbindung pro Aufruf ist gelegentlich flaky
+            try:
+                parsed = json.loads(await mcp_hub.call_tool(server, search_tool, {"query": w, "limit": 12}))
+                res = parsed.get("result", []) if isinstance(parsed, dict) else []
+                break
+            except Exception as e:
+                last_err = str(e)[:200]
+                res = None
+        for d in (res or []):
+            idx = d.get("idx") or d.get("ID")
+            if idx in seen:
+                continue
+            seen.add(idx)
+            exact = w in (d.get("Name") or "").lower()   # Suchwort im Gerätenamen = sehr relevant
+            got_exact = got_exact or exact
+            scored.append((0 if exact else 1, d))
+        if got_exact:                        # spezifischer Treffer reicht — spart weitere Suchen
+            break
+    scored.sort(key=lambda x: x[0])          # exakte Namens-Treffer zuerst
+    devices = [d for _, d in scored][:10]
+    debug.log("smarthome_hint", server=server, words=words[:4], found=len(devices),
+              error=last_err if not devices else None)
+    if not devices:
+        return ""
+
+    def _fmt(d):
+        parts = [f"Status {d.get('Data')}"]
+        # Mess-/Energie-Geräte: Momentanwert + Tagesverbrauch direkt mitgeben (oft schon DIE Antwort).
+        if d.get("Usage") not in (None, "", "None"):
+            parts.append(f"aktuell {d.get('Usage')}")
+        if d.get("CounterToday") not in (None, "", "None"):
+            parts.append(f"heute {d.get('CounterToday')}")
+        return f"- {d.get('Name')} → idx {d.get('idx') or d.get('ID')} ({d.get('Type')}, {', '.join(parts)})"
+
+    lines = [_fmt(d) for d in devices[:10]]
+    return ("\n\nPASSENDE GERÄTE (für diese Anfrage SOEBEN live aufgelöst, Werte sind AKTUELL und GÜLTIG):\n"
+            + "\n".join(lines) +
+            "\n→ Beantworte Mess-/Verbrauchsfragen DIREKT mit dem Wert oben (z.B. der 'aktuell …'-Wert in "
+            "Watt/°C) — KEIN Werkzeug nötig. Behaupte NIEMALS, ein Gerät sei 'nicht erreichbar' oder "
+            "'nicht verfügbar', wenn es oben steht (ignoriere ältere solche Aussagen im Verlauf). "
+            "Zum Schalten/Dimmen das passende Werkzeug DIREKT mit der `idx` aufrufen (KEINE Geräte-Suche, "
+            "KEIN `name`-Parameter).")
 
 
 async def _prepare_turn(req: ChatRequest):
@@ -410,6 +516,14 @@ async def _prepare_turn(req: ChatRequest):
 
     system += skills.catalog_hint()           # deferred: nur Namen+Beschreibung der vorhandenen Skills
     system += mcp_hub.catalog_hint()          # deferred: MCP-Server als Katalog (Tools on demand laden)
+    # MCP-Beschleunigung: passt der Text zu den Stichwörtern eines MCP-Servers (Admin-UI, je Server),
+    # die Geräte VORAB auflösen + idx/Messwert in den Prompt → Ein-Schritt-Antwort/-Schaltbefehl.
+    _accel = mcp_hub.match_accel(req.message)
+    if _accel:
+        try:
+            system += await _smarthome_device_hint(req.message, _accel[0], _accel[1])
+        except Exception:
+            pass
     history = context_budget.fit(sid, system, list(hub.history(sid)), req.message, cfg)
     working = [{"role": "system", "content": system}] + history + \
               [{"role": "user", "content": req.message}]
@@ -433,6 +547,23 @@ async def _prepare_turn(req: ChatRequest):
     # Erkannt an Dev-Schlüsselwörtern in der Anfrage ODER laufendem Dev-Flow der Session (klebt ~15 min).
     if mode in ("adaptive", "auto") and (_is_dev_request(req.message) or hub.is_dev(sid)):
         think, mode = True, "always"  # mode=always → adaptive Fast-Pass überspringen, direkt mit Denken
+    # MCP-Beschleunigung: passende Geräte-Steuer-Tools DIREKT vorladen (kein search/load-Umweg) UND
+    # mit Denken starten. Der schnelle No-Think-Pass ignorierte den injizierten Wert sonst gelegentlich
+    # und halluzinierte „nicht erreichbar" (vor allem im Streaming, wo ein nachträglicher Retry den
+    # Nutzer schon den Fehlsatz hören ließe). Dank Vorauflösung braucht der Read-Fall 0 Tools → trotz
+    # Denken nur EINE LLM-Runde; mode=always überspringt den adaptiven Fast-Pass.
+    if _accel:
+        ctx["loaded_mcp"] = mcp_hub.device_tool_names(_accel[0])
+        if _is_switch_command(req.message):
+            # Schaltbefehl: schneller No-Think-Pass (idx vorab aufgelöst → 1 Tool-Call, ~11 s).
+            # think/mode bleiben adaptive → bei Fehlschlag greift der Retry MIT Denken als Netz.
+            pass
+        else:
+            # Lese-/Messfrage: Denken ERZWINGEN (sonst Halluzination „nicht erreichbar"); da Geräte
+            # vorab aufgelöst sind, genügt KURZES Denken → kleines Budget = schnell + zuverlässig.
+            think, mode = True, "always"
+            cfg = {**cfg, "thinking_budget": min(int(cfg.get("thinking_budget") or 512), 160)}
+            ctx["cfg"] = cfg
     return cfg, sid, ctx, identity, working, available_tools, think, mode, onboarding_q
 
 
@@ -514,6 +645,15 @@ def _update_profile_bg(ctx: dict) -> None:
     threading.Thread(target=_work, daemon=True).start()
 
 
+def _is_unverified_claim(final: str, ctx: dict) -> bool:
+    """True, wenn die Antwort eine Aktion mit Außenwirkung behauptet, ohne dass ein passendes
+    Side-Effect-Tool in diesem Turn geglückt ist (halluzinierter Erfolg, #10)."""
+    if not final or not _CLAIM_RE.search(final):
+        return False
+    calls = ctx.get("turn_tool_calls") or []
+    return not any((c["name"] in _SIDE_EFFECT_TOOLS or c["name"].startswith("mcp__")) and c["ok"] for c in calls)
+
+
 def _finalize_turn(ctx: dict, sid: str, final: str) -> None:
     """Turn-Abschluss: Tool-Gedächtnis (#2) + Verify-by-Tool (#10) + Gesprächs-Index (Phase 1) + Profil (Phase 3)."""
     tt = ctx.get("turn_tools")
@@ -521,13 +661,9 @@ def _finalize_turn(ctx: dict, sid: str, final: str) -> None:
         hub.set_last_tools(sid, tt[-3:])
     _index_conversation_bg(ctx, final)
     _update_profile_bg(ctx)
-    # #10: Behauptet die Antwort eine Aktion mit Außenwirkung, ohne dass ein passendes Tool geglückt ist?
-    if final and _CLAIM_RE.search(final):
-        calls = ctx.get("turn_tool_calls") or []
-        ok = any((c["name"] in _SIDE_EFFECT_TOOLS or c["name"].startswith("mcp__")) and c["ok"] for c in calls)
-        if not ok:
-            debug.log("unverified_claim", session=sid, reply=final[:200],
-                      tools=[c["name"] for c in calls])
+    if _is_unverified_claim(final, ctx):
+        debug.log("unverified_claim", session=sid, reply=final[:200],
+                  tools=[c["name"] for c in (ctx.get("turn_tool_calls") or [])])
 
 
 def _degenerate_calls(calls: list, seen: dict) -> bool:
@@ -598,6 +734,14 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
         debug.log("retry", reason="adaptive: 1. Versuch ohne Denken ohne Ergebnis")
         r = await _run_loop(cfg, ctx, base_working, available_tools, True)
         retried = True
+    # Halluzinierter Erfolg (behauptet getan, aber kein Tool aufgerufen) → mit Denken erzwingen (#10).
+    if mode == "adaptive" and not retried and _is_unverified_claim(r.get("content", ""), ctx):
+        debug.log("retry", reason="unverifizierte Erfolgsbehauptung → erneut mit Denken")
+        ctx["turn_tools"], ctx["turn_tool_calls"] = [], []
+        r2 = await _run_loop(cfg, ctx, base_working, available_tools, True)
+        retried = True
+        if r2.get("content"):
+            r = r2
     content = r["content"] or "Entschuldige, das hat nicht geklappt — bitte versuche es nochmal."
     hub.append_history(sid, "user", req.message)
     hub.append_history(sid, "assistant", content)
@@ -758,6 +902,11 @@ async def chat_stream(req: ChatRequest):
                     return
             ctx.pop("status_cb", None)
             r = task.result()
+            # Halluzinierter Erfolg → Schnell-Pass verwerfen, mit Denken streamen (#10).
+            if r["ok"] and _is_unverified_claim(r["content"], ctx):
+                debug.log("retry", reason="unverifizierte Erfolgsbehauptung → erneut mit Denken")
+                ctx["turn_tools"], ctx["turn_tool_calls"] = [], []
+                r = {"ok": False}
             if r["ok"]:
                 for s in _split_sentences(r["content"]):
                     yield _sse("sentence", {"text": s})
@@ -970,6 +1119,9 @@ async def announce(session_id: str, text: str, *, kind: str = "notify", **meta) 
 async def _run_automation(autom: dict, payload: dict | None) -> str:
     """Runner für den AutomationManager. Watcher = günstiger Skript-Check, LLM nur bei Treffer;
     sonst klassischer autonomer Agenten-Tool-Loop."""
+    pj = _plugin_job_meta(autom)
+    if pj:
+        return await _run_plugin_job(autom, pj, payload)
     if autom.get("kind") == "watcher":
         return await _run_watcher(autom, payload)
     return await _automation_llm_run(autom, payload)
@@ -1080,6 +1232,121 @@ async def _deliver_automation(autom: dict, text: str, payload: dict | None) -> N
     if messaging.enabled() and autom.get("owner_user_id") is not None:
         await asyncio.to_thread(messaging.send_to_user, autom["owner_user_id"],
                                 f"🤖 {autom['title']}: {text}")
+
+
+# ── Plugin-Gateway: Hooks für api_v1 (siehe pluginsystem.md) ──────────────────
+
+def _plugin_ctx(user_id) -> dict:
+    cfg = config.get()
+    return {"session_id": "plugin", "cfg": cfg,
+            "namespace": (f"u{user_id}" if user_id else "guest"), "user_id": user_id}
+
+
+async def _plugin_run_agent(task: str, user_id, allow_tools) -> str:
+    """Voller Agenten-Tool-Loop im Auftrag eines Plugins (Rechte des handelnden Nutzers)."""
+    cfg = config.get()
+    ctx = _plugin_ctx(user_id)
+    system = cfg["system_prompt"] + _now_hint() + skills.catalog_hint() + mcp_hub.catalog_hint()
+    working = [{"role": "system", "content": system}, {"role": "user", "content": task}]
+    available = list(tools.TOOL_SCHEMAS)
+    if allow_tools:
+        allow = set(allow_tools)
+        available = [s for s in available if s.get("function", {}).get("name") in allow]
+    available += mcp_hub.tool_schemas()
+    r = await _run_loop(cfg, ctx, working, available, think=True)
+    return (r.get("content") or "").strip()
+
+
+async def _plugin_invoke_tool(name: str, args: dict, user_id) -> str:
+    return await tools.execute_tool(name, args, _plugin_ctx(user_id))
+
+
+def _plugin_tool_schemas_for(user_id):
+    return [s for s in tools.TOOL_SCHEMAS
+            if auth.is_tool_allowed(user_id, f"tool:{s.get('function', {}).get('name', '')}")]
+
+
+def _iso(epoch):
+    return datetime.fromtimestamp(epoch).isoformat() if epoch else None
+
+
+def _plugin_trigger(sched: dict) -> dict:
+    if "in_seconds" in sched:
+        return {"type": "once", "at": time.time() + float(sched["in_seconds"])}
+    if "at" in sched:
+        return {"type": "once", "at": datetime.fromisoformat(sched["at"]).timestamp()}
+    if "interval_seconds" in sched:
+        return {"type": "interval", "seconds": int(sched["interval_seconds"])}
+    if "daily" in sched:
+        return {"type": "daily", "time": sched["daily"]}
+    if "cron" in sched:
+        p = str(sched["cron"]).split()
+        if len(p) >= 5 and p[2:5] == ["*", "*", "*"]:
+            return {"type": "daily", "time": f"{int(p[1]):02d}:{int(p[0]):02d}"}
+        raise ValueError("Nur einfache tägliche Cron-Ausdrücke (M H * * *) werden unterstützt.")
+    raise ValueError("Unbekanntes schedule-Format (in_seconds|at|interval_seconds|daily|cron).")
+
+
+def _plugin_job_meta(autom: dict):
+    try:
+        d = json.loads(autom.get("task") or "")
+        return d if isinstance(d, dict) and "__plugin__" in d else None
+    except Exception:
+        return None
+
+
+async def _plugin_schedule_job(spec: dict) -> dict:
+    trigger = _plugin_trigger(spec.get("schedule") or {})
+    task = json.dumps({"__plugin__": spec["plugin_id"], "action": spec.get("action") or {}},
+                      ensure_ascii=False)
+    a = automations.manager.create(spec.get("title") or "Plugin-Job", task, trigger,
+                                   owner_user_id=spec.get("owner_user_id"),
+                                   target_session=spec.get("session_id"))
+    return {"id": a["id"], "next_run": _iso(a.get("next_run")),
+            "trigger": automations.trigger_summary(trigger)}
+
+
+def _plugin_list_jobs(plugin_id: str) -> list:
+    out = []
+    for a in automations.manager.list("__all__"):
+        pj = _plugin_job_meta(a)
+        if pj and pj.get("__plugin__") == plugin_id:
+            out.append({"id": a["id"], "title": a["title"], "next_run": _iso(a.get("next_run")),
+                        "trigger": automations.trigger_summary(a["trigger"]),
+                        "action": pj.get("action"), "enabled": a.get("enabled")})
+    return out
+
+
+def _plugin_delete_job(plugin_id: str, job_id: str) -> bool:
+    a = automations.manager.get(job_id)
+    pj = _plugin_job_meta(a) if a else None
+    if not pj or pj.get("__plugin__") != plugin_id:
+        return False
+    return automations.manager.delete(job_id)
+
+
+async def _run_plugin_job(autom: dict, pj: dict, payload: dict | None) -> str:
+    """Runner-Pfad für geplante Plugin-Jobs (kein LLM, außer action.type == 'agent')."""
+    action = pj.get("action") or {}
+    atype = action.get("type")
+    pid = pj["__plugin__"]
+    if atype == "event":
+        topic = f"jarvis/plugin/{pid}/{action.get('event', 'job')}"
+        await plugin_bus.publish(topic, action.get("payload") or {"job": autom["title"]},
+                                 source="scheduler")
+        return automations.SILENT_TOKEN
+    if atype == "webhook" and action.get("url"):
+        import requests as _rq
+        try:
+            await asyncio.to_thread(lambda: _rq.post(action["url"], json=action.get("payload") or {}, timeout=15))
+        except Exception as e:
+            debug.log("plugin_webhook_fail", url=action["url"], error=str(e)[:200])
+        return automations.SILENT_TOKEN
+    if atype == "notify":
+        return action.get("text") or autom["title"]      # → _deliver_automation liefert es aus
+    if atype == "agent":
+        return await _automation_llm_run(autom, payload, extra_user=action.get("task"))
+    return automations.SILENT_TOKEN
 
 
 # ── Nutzerseitige Kalender-API (Identität aus der Session/Stimme) ─────────────
@@ -1701,7 +1968,7 @@ def admin_group_perms(body: dict, jarvis_admin_token: str | None = Cookie(defaul
 @app.get("/api/admin/mcp")
 def admin_mcp_list(jarvis_admin_token: str | None = Cookie(default=None)):
     _admin(jarvis_admin_token)
-    return {"servers": mcp_hub.list_servers()}
+    return {"servers": mcp_hub.list_servers(), "default_keywords": mcp_hub.DEFAULT_ACCEL_KEYWORDS}
 
 
 @app.post("/api/admin/mcp")
@@ -1733,6 +2000,88 @@ async def admin_mcp_refresh(jarvis_admin_token: str | None = Cookie(default=None
     _admin(jarvis_admin_token)
     await mcp_hub.refresh()
     return {"servers": mcp_hub.list_servers()}
+
+
+@app.post("/api/admin/mcp/keywords")
+def admin_mcp_keywords(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Stichwörter eines MCP-Servers für die Vorauflösungs-Beschleunigung setzen (leer = Standardliste)."""
+    _admin(jarvis_admin_token)
+    mcp_hub.set_keywords((body or {}).get("name", ""), (body or {}).get("keywords", ""))
+    return {"ok": True, "servers": mcp_hub.list_servers(), "default_keywords": mcp_hub.DEFAULT_ACCEL_KEYWORDS}
+
+
+# ── Plugin-Verwaltung (Registry, API-Keys, Scopes) ───────────────────────────
+
+@app.get("/api/admin/plugins")
+def admin_plugins_list(jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    return {"plugins": plugins_registry.list_plugins(),
+            "api_scopes": plugins_registry.API_SCOPES,
+            "tool_resources": sorted(f"tool:{s['function']['name']}" for s in tools.TOOL_SCHEMAS),
+            "mcp_resources": mcp_hub.server_resources()}
+
+
+@app.post("/api/admin/plugins")
+def admin_plugins_register(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    try:
+        p = plugins_registry.register(body or {})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "plugin": p}
+
+
+@app.post("/api/admin/plugins/enable")
+def admin_plugins_enable(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    plugins_registry.set_enabled((body or {}).get("id", ""), bool((body or {}).get("enabled", True)))
+    return {"ok": True}
+
+
+@app.post("/api/admin/plugins/delete")
+def admin_plugins_delete(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    plugins_registry.delete((body or {}).get("id", ""))
+    return {"ok": True}
+
+
+@app.get("/api/admin/plugins/{pid}/keys")
+def admin_plugins_keys(pid: str, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    return {"keys": plugins_registry.list_keys(pid)}
+
+
+@app.post("/api/admin/plugins/{pid}/keys")
+def admin_plugins_key_create(pid: str, body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    b = body or {}
+    user_id = None
+    if b.get("user"):
+        u = auth.user_by_name(b["user"].strip())
+        if not u:
+            raise HTTPException(status_code=400, detail=f"Unbekannter Nutzer „{b['user']}“.")
+        user_id = u["id"]
+    try:
+        token = plugins_registry.create_key(pid, b.get("scopes") or [], label=b.get("label", ""),
+                                            user_binding=user_id, ttl_days=b.get("ttl_days"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Token wird NUR HIER einmalig im Klartext zurückgegeben.
+    return {"ok": True, "token": token}
+
+
+@app.post("/api/admin/plugins/keys/revoke")
+def admin_plugins_key_revoke(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    plugins_registry.revoke_key((body or {}).get("kid", ""))
+    return {"ok": True}
+
+
+@app.post("/api/admin/plugins/keys/scopes")
+def admin_plugins_key_scopes(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    _admin(jarvis_admin_token)
+    plugins_registry.set_key_scopes((body or {}).get("kid", ""), (body or {}).get("scopes", []))
+    return {"ok": True}
 
 
 @app.get("/api/admin/debug")
@@ -2168,11 +2517,22 @@ async def _startup():
         await asyncio.to_thread(auth.init)
         await asyncio.to_thread(biometrics.init)
         await asyncio.to_thread(mcp_hub.init)
+        debug.set_enabled(bool(config.get().get("debug_enabled", False)))   # früh, damit Startup-Events geloggt werden
         await mcp_hub.refresh()       # MCP-Tool-Listen laden
+        debug.log("mcp_startup", servers=[{"name": s["name"], "tools": s.get("tool_count"),
+                                           "error": s.get("error")} for s in mcp_hub.list_servers()])
+        await asyncio.to_thread(plugins_registry.init)       # Plugin-Registry/Keys/KV
         await asyncio.to_thread(services._get_embed_model)   # lokales Embedding vorladen
-        debug.set_enabled(bool(config.get().get("debug_enabled", False)))
     except Exception as e:
         print(f"[startup] DB/MCP-Init: {e}")
+        debug.log("startup_error", error=str(e)[:300])
+
+    # Plugin-Gateway (/api/v1/*) verdrahten: Core-Events in den Bus + Hooks bereitstellen
+    automations.add_listener(plugin_bus.forward_core_event)
+    api_v1.set_hooks(announce=announce, run_agent=_plugin_run_agent,
+                     invoke_tool=_plugin_invoke_tool, tool_schemas_for=_plugin_tool_schemas_for,
+                     schedule_job=_plugin_schedule_job, list_jobs=_plugin_list_jobs,
+                     delete_job=_plugin_delete_job, hub=hub)
 
     async def _on_fire(info: dict):
         # Timer/Wecker sind nur EIN Nutzer des universellen Rückkanals; Automatisierungen,
@@ -2198,6 +2558,32 @@ async def _startup():
 
     # Externe iCal-Abos periodisch abgleichen
     asyncio.create_task(_calendar_sync_poller())
+
+    # MCP-Tool-Listen periodisch erneuern (heilt transiente Start-Ausfälle selbst)
+    asyncio.create_task(_mcp_refresh_poller())
+
+
+async def _mcp_refresh_poller():
+    """Aktualisiert die MCP-Tool-Listen regelmäßig. War ein Server beim Start kurz weg
+    (0 Tools / Fehler), wird häufig (60 s) erneut versucht, bis er gesund ist; danach
+    seltener (10 min), um Tool-Änderungen mitzunehmen. So muss bei einem transienten
+    Smarthome-Ausfall NICHT der ganze Orchestrator neu gestartet werden."""
+    while True:
+        try:
+            servers = mcp_hub.list_servers()
+            unhealthy = any(s.get("enabled") and (not s.get("tool_count") or s.get("error"))
+                            for s in servers)
+        except Exception:
+            unhealthy = True
+        await asyncio.sleep(60 if unhealthy else 600)
+        try:
+            await mcp_hub.refresh()
+            servers = mcp_hub.list_servers()
+            if any(s.get("enabled") and (not s.get("tool_count") or s.get("error")) for s in servers):
+                debug.log("mcp_refresh", servers=[{"name": s["name"], "tools": s.get("tool_count"),
+                                                   "error": s.get("error")} for s in servers])
+        except Exception as e:
+            debug.log("mcp_refresh_error", error=str(e)[:200])
 
 
 @app.post("/api/stt")
@@ -2293,6 +2679,72 @@ def tts(req: TTSRequest):
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+def _cors_allowed_origin(origin: str | None) -> str | None:
+    """Liefert den zu spiegelnden Origin, wenn er erlaubt ist — sonst None.
+    Erlaubt: config.plugin_cors_origins (inkl. "*") PLUS die ui.entry-Origins
+    aller registrierten Plugins (so wird ein Plugin automatisch freigeschaltet)."""
+    if not origin:
+        return None
+    allowed = config.get().get("plugin_cors_origins") or ["*"]
+    if "*" in allowed:
+        return origin                     # spiegeln (zulässig, da allow_credentials=False)
+    if origin in allowed:
+        return origin
+    try:
+        from urllib.parse import urlparse
+        for p in plugins_registry.list_plugins():
+            man = (plugins_registry.get(p["id"]) or {}).get("manifest") or {}
+            entry = (man.get("ui") or {}).get("entry") or ""
+            if entry:
+                u = urlparse(entry)
+                if u.scheme and u.netloc and origin == f"{u.scheme}://{u.netloc}":
+                    return origin
+    except Exception:
+        pass
+    return None
+
+
+@app.middleware("http")
+async def _cors_gateway(request: Request, call_next):
+    """CORS für das Plugin-Gateway /api/v1/* (Browser-PWAs auf anderem Origin).
+    Bearer-basiert → keine Cookies, daher kein Allow-Credentials nötig."""
+    origin = request.headers.get("origin")
+    is_api = request.url.path.startswith("/api/v1")
+    if is_api and request.method == "OPTIONS" and origin is not None:
+        allow = _cors_allowed_origin(origin)
+        headers = {}
+        if allow:
+            req_hdrs = request.headers.get("access-control-request-headers",
+                                           "Authorization, Content-Type, X-JARVIS-User, X-JARVIS-API")
+            headers = {
+                "Access-Control-Allow-Origin": allow,
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": req_hdrs,
+                "Access-Control-Max-Age": "600",
+                "Vary": "Origin",
+            }
+        return Response(status_code=204, headers=headers)
+    resp = await call_next(request)
+    if is_api and origin is not None:
+        allow = _cors_allowed_origin(origin)
+        if allow:
+            resp.headers["Access-Control-Allow-Origin"] = allow
+            resp.headers["Access-Control-Expose-Headers"] = "X-JARVIS-API, X-Plugin-Namespace"
+            resp.headers["Vary"] = "Origin"
+    return resp
+
+
+@app.middleware("http")
+async def _no_cache_ui(request: Request, call_next):
+    """UI-Assets (JS/CSS/HTML) immer revalidieren lassen — verhindert, dass Browser nach
+    einem Update veraltetes admin.js/app.js ausliefern (ETag/Last-Modified → billiges 304)."""
+    resp = await call_next(request)
+    p = request.url.path
+    if p.startswith("/static/") or p in ("/", "/admin", "/downloads"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
