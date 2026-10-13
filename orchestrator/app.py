@@ -14,6 +14,7 @@ Danach im Browser:  http://<host>:8000
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import time
@@ -66,6 +67,7 @@ class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
     session_id: str | None = None
+    image: str | None = None          # optionales Bild zum Turn (data:-URI oder http(s)-URL)
 
 
 class TTSRequest(BaseModel):
@@ -427,6 +429,46 @@ async def _smarthome_device_hint(message: str, server: str, search_tool: str) ->
             "KEIN `name`-Parameter).")
 
 
+# Vision-Modelle antworten auf Aufgaben, die sie im Bild nicht lösen können, gern mit
+# „bitte lade das Bild hoch" — obwohl sie es sehen. Solche Absagen erkennen wir und fragen
+# neutral nach einer reinen Beschreibung nach (sonst gibt der Agent die Absage 1:1 weiter).
+_VISION_REFUSAL_RE = re.compile(
+    r"(lade[^.]{0,40}(bild|foto|datei)[^.]{0,30}hoch|(bild|foto|datei)[^.]{0,30}hochl|"
+    r"(sende|schicke|zeige)[^.]{0,20}mir[^.]{0,20}(das|ein)[^.]{0,10}(bild|foto)|"
+    r"kein(e|en)? (bild|foto|datei)[^.]{0,30}(erhalten|hochgeladen|bekommen|vorliegen|vorhanden))",
+    re.IGNORECASE)
+
+
+def _vision_prepass_prompt(task: str = "") -> str:
+    """Frage ans Vision-Modell: BESCHREIBEN (inkl. wörtlicher Textwiedergabe), nicht die Aufgabe lösen."""
+    q = ("Beschreibe dieses Bild vollständig und sachlich auf Deutsch: Was ist darauf zu sehen? "
+         "Gib ALLE lesbaren Texte WÖRTLICH wieder (auch Listen, Namen, Zahlen, Handschrift, Schilder). "
+         "Das Bild liegt dir vor — fordere NIEMALS ein Bild an und sage nicht, du hättest keines.")
+    if task.strip():
+        q += f"\n\nAchte dabei besonders auf alles, was für diese Aufgabe des Nutzers wichtig ist: {task.strip()[:400]}"
+    return q
+
+
+async def _image_prepass(img: str, task: str, cfg: dict, sid: str) -> str:
+    """Bild EINMAL ansehen lassen → Beschreibung für den Agenten-Prompt.
+    Bei leerer Antwort oder „lade das Bild hoch"-Absage: ein zweiter, neutraler Versuch."""
+    best = ""
+    for attempt, question in enumerate((_vision_prepass_prompt(task), _vision_prepass_prompt())):
+        t0 = time.time()
+        try:
+            desc = (await asyncio.to_thread(services.vision_call, question, img, cfg) or "").strip()
+        except Exception as e:
+            desc = ""
+            debug.log("vision_error", session=sid, error=str(e)[:300])
+        refused = bool(desc) and bool(_VISION_REFUSAL_RE.search(desc))
+        debug.log("vision_prepass", session=sid, attempt=attempt + 1, bytes=len(img),
+                  ms=int((time.time() - t0) * 1000), chars=len(desc), refused=refused, preview=desc[:300])
+        if desc and not refused:
+            return desc
+        best = best or desc
+    return best
+
+
 async def _prepare_turn(req: ChatRequest):
     """Gemeinsame Vorbereitung für Stream- und Nicht-Stream-Chat:
     Identität, Sprecherwechsel-Reset, System-Prompt (+Recall), Verlauf, Tools."""
@@ -492,6 +534,30 @@ async def _prepare_turn(req: ChatRequest):
                    "Nenne Ergebnisse direkt als gesprochenen Satz (Wetter, Uhrzeit, Smart-Home, kurze Web-Antworten). "
                    "Vermeide lange Aufzählungen, URLs und Formatierung.")
         ctx["channel"] = "satellite"
+    # ── Bild zu dieser Nachricht (Telegram-Foto, Web-Upload): EINMAL ansehen ──
+    # Das Bild wird vorab vom Vision-Modell BESCHRIEBEN (nicht: die Nutzeraufgabe gelöst) und die
+    # Beschreibung in den Prompt gelegt — so kann der Agent die eigentliche AUFGABE zum Bild mit
+    # allen Werkzeugen erledigen (merken, notieren, eintragen …), statt nur zu beschreiben.
+    if req.image:
+        img = req.image.strip()
+        if img.startswith("http"):                 # GPU-Server hat kein Internet → selbst laden
+            uri, _ = await asyncio.to_thread(tools.image_data_uri, img)
+            img = uri or ""
+        if img:
+            hub.set_last_image(sid, img)
+            ctx["image"] = img
+        desc = await _image_prepass(img, req.message, cfg, sid) if img else ""
+        system += "\n\nBILD: Der Nutzer hat zu dieser Nachricht ein Bild mitgeschickt — es liegt dir bereits vor. "
+        system += (f"Das Vision-Modell hat es angesehen und beschreibt es so:\n\"\"\"\n{desc}\n\"\"\"\n"
+                   "Erledige damit die Aufgabe des Nutzers zum Bild (Werkzeuge sind dabei erlaubt). "
+                   "Fehlen dir Details, sieh es dir selbst erneut an: analyze_image mit image_url=\"session\"."
+                   if desc else
+                   "Die automatische Beschreibung ist fehlgeschlagen — sieh es dir selbst an: "
+                   "analyze_image mit image_url=\"session\".")
+        system += ("\nVERBOTEN: den Nutzer auffordern, das Bild (nochmal) hochzuladen/zu schicken, oder zu behaupten, "
+                   "du hättest kein Bild bekommen. Findest du das Gesuchte nicht auf dem Bild, sage ehrlich, "
+                   "was stattdessen darauf zu sehen ist.")
+
     try:
         mems = await asyncio.to_thread(knowledge.recall_memory, cfg, req.message, namespace)
         if mems:
@@ -777,7 +843,7 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
         if r2.get("content"):
             r = r2
     content = r["content"] or "Entschuldige, das hat nicht geklappt — bitte versuche es nochmal."
-    hub.append_history(sid, "user", req.message)
+    hub.append_history(sid, "user", f"[Bild gesendet] {req.message}".strip() if req.image else req.message)
     hub.append_history(sid, "assistant", content)
     _finalize_turn(ctx, sid, content)
     debug.log("turn_done", channel=channel, ms=int((time.time() - t0) * 1000),
@@ -1626,6 +1692,7 @@ async def _calendar_sync_poller() -> None:
 
 # Bitte um gesprochene Antwort (Telegram-Sprachnachricht).
 _TG_VOICE_RE = re.compile(r"(sprachnachricht|als sprache|gesprochen|münd|vorlesen|antworte.*sprach)", re.IGNORECASE)
+_TG_MAX_IMAGE_BYTES = 12_000_000        # Obergrenze für eingehende Telegram-Bilder
 
 
 def _tts_ogg(text: str, cfg: dict) -> bytes | None:
@@ -1702,6 +1769,49 @@ async def _handle_telegram_voice(chat_id, voice: dict, sender: str = "") -> None
     await _handle_telegram_message(chat_id, text, sender, prefer_voice=True)
 
 
+async def _handle_telegram_photo(chat_id, m: dict, sender: str = "") -> None:
+    """Eingehendes Telegram-FOTO (auch als Bild-Datei gesendet): herunterladen → als Bild an den
+    Agenten-Turn hängen. Die Bildunterschrift ist die AUFGABE („Was steht hier?", „Notier das in
+    Obsidian"); ohne Unterschrift wird das Bild einfach beschrieben.
+    Sicherheit wie bei Text: unverifizierte Chats werden nur als „ausstehend" protokolliert."""
+    caption = (m.get("caption") or "").strip()
+    if not await asyncio.to_thread(messaging.is_verified, chat_id):
+        messaging.add_pending(chat_id, sender, f"[Bild] {caption}".strip())
+        debug.log("telegram_blocked", chat=chat_id, sender=sender, message="[Bild]")
+        return
+    photos = m.get("photo") or []
+    doc = m.get("document") or {}
+    if photos:                                   # Telegram liefert mehrere Größen → größte nehmen
+        biggest = max(photos, key=lambda p: p.get("file_size") or p.get("width") or 0)
+        file_id, mime, fname = biggest.get("file_id"), "image/jpeg", "foto.jpg"
+    else:                                        # unkomprimiert als Datei gesendet
+        file_id = doc.get("file_id")
+        mime = doc.get("mime_type") or "image/jpeg"
+        fname = doc.get("file_name") or "bild"
+    data = await asyncio.to_thread(messaging.download_file, file_id)
+    if not data:
+        await asyncio.to_thread(messaging.send_to_chat, chat_id, "Ich konnte das Bild nicht laden.")
+        return
+    if len(data) > _TG_MAX_IMAGE_BYTES:
+        await asyncio.to_thread(messaging.send_to_chat, chat_id,
+                                "Das Bild ist zu groß (max. 12 MB) — bitte kleiner schicken.")
+        return
+    data_uri = f"data:{mime};base64," + base64.b64encode(data).decode()
+    sid = f"tg{chat_id}"
+    user = await asyncio.to_thread(messaging.user_for_chat, chat_id)
+    if user:
+        hub.set_identity(sid, {"user_id": user["id"], "username": user["username"], "confidence": 1.0})
+    debug.log("telegram_photo_in", chat=chat_id, user=(user or {}).get("username"),
+              bytes=len(data), file=fname, caption=caption[:200])
+    prompt = caption or "Ich schicke dir ein Bild. Was ist darauf zu sehen?"
+    try:
+        reply, _ = await _run_chat(ChatRequest(message=prompt, session_id=sid, image=data_uri),
+                                   channel="telegram")
+    except Exception as e:
+        reply = f"Fehler: {e}"
+    await _telegram_reply(chat_id, reply, bool(_TG_VOICE_RE.search(caption)))
+
+
 async def _telegram_poller() -> None:
     """Dauerhafter Long-Poll-Loop; idlet, solange Telegram deaktiviert ist (Live-Toggle möglich)."""
     offset = 0
@@ -1720,13 +1830,21 @@ async def _telegram_poller() -> None:
             chat = (m.get("chat") or {}).get("id")
             txt = m.get("text")
             voice = m.get("voice") or m.get("audio")          # Sprachnachricht / Audiodatei
+            doc = m.get("document") or {}
+            photo = m.get("photo") or (doc if str(doc.get("mime_type", "")).startswith("image/") else None)
             frm = m.get("from") or {}
             sender = (frm.get("username") and "@" + frm["username"]) or \
                      " ".join(filter(None, [frm.get("first_name"), frm.get("last_name")])) or ""
-            if chat and txt:
+            if chat and photo:                                # Foto/Bild-Datei (ggf. mit Aufgabe als Bildunterschrift)
+                await _handle_telegram_photo(chat, m, sender)
+            elif chat and txt:
                 await _handle_telegram_message(chat, txt, sender)
             elif chat and voice:
                 await _handle_telegram_voice(chat, voice, sender)
+            elif chat and doc and await asyncio.to_thread(messaging.is_verified, chat):
+                await asyncio.to_thread(messaging.send_to_chat, chat,
+                                        "Diese Datei kann ich noch nicht verarbeiten — "
+                                        "Text, Sprachnachrichten und Bilder gehen aber.")
 
 
 @app.websocket("/ws/satellite")
@@ -2750,6 +2868,7 @@ async def vision(file: UploadFile = File(...), question: str = Form(default=""),
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Bildanalyse fehlgeschlagen: {e}")
     if session_id:
+        hub.set_last_image(session_id, data_url)      # Rückfragen: analyze_image mit image_url="session"
         hub.append_history(session_id, "user", f"[Bild gesendet] {question}".strip())
         hub.append_history(session_id, "assistant", answer)
     debug.log("vision", session=session_id, question=question[:120], bytes=len(data))

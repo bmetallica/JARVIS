@@ -29,13 +29,16 @@ _seq = 0
 # ── Persistente JSONL-Logs ───────────────────────────────────────────────────
 _LOG_DIR = Path(os.environ.get("JARVIS_LOG_DIR", Path(__file__).resolve().parent / "logs"))
 # Nur wirklich aussagekräftige Ereignisse persistieren (kein Rauschen, kein PII-Volltext der Audios).
-_PERSIST_KINDS = {"turn", "turn_done", "llm_error", "retry", "tool", "tool_loop_abort",
-                  "automation_done", "llm_502", "context_trim", "unverified_claim",
-                  "mcp_startup", "mcp_refresh", "mcp_refresh_error", "startup_error", "smarthome_hint"}
+_PERSIST_KINDS = {"turn", "turn_done", "llm", "llm_error", "retry", "tool", "tool_loop_abort",
+                  "automation_done", "automation_deferred", "llm_502", "context_trim", "unverified_claim",
+                  "mcp_startup", "mcp_refresh", "mcp_refresh_error", "startup_error", "smarthome_hint",
+                  "fast_confirm", "housekeeping", "keepalive_error",
+                  "telegram_photo_in", "vision_prepass", "vision_error",
+                  "event_fire", "event_fire_denied", "event_token_rotated"}
 
 # Felder, die Nutzer-Inhalte enthalten — bei aktivem log_redact aus den JSONL-Logs entfernt
 # (es bleibt nur die Länge erhalten, damit Diagnose ohne Klartext möglich ist).
-_REDACT_FIELDS = ("message", "reply", "args", "result")
+_REDACT_FIELDS = ("message", "reply", "args", "result", "preview", "caption")
 _last_cleanup_day = ""
 
 

@@ -34,6 +34,7 @@ class SessionHub:
         self._summary: dict = {}     # session_id -> rollierende Zusammenfassung getrimmter alter Turns
         self._cancel: dict = {}      # session_id -> True, wenn laufender Turn abgebrochen werden soll (Barge-in)
         self._authed: dict = {}      # session_id -> identity (explizite Passwort-Anmeldung, Vorrang vor Stimme)
+        self._image: dict = {}       # session_id -> {uri, ts}  (zuletzt gesendetes Bild → Rückfragen)
 
     def mark_dev(self, session_id: str | None) -> None:
         """Session ist in einem Entwicklungs-/Bau-Flow (Skill/Code/Browser-Automation)."""
@@ -112,6 +113,7 @@ class SessionHub:
         self._history[session_id] = []
         self._summary.pop(session_id, None)
         self._last_tools.pop(session_id, None)
+        self._image.pop(session_id, None)
         try:
             import store
             store.history_reset(session_id)
@@ -126,6 +128,20 @@ class SessionHub:
 
     def get_last_tools(self, session_id: str) -> list[dict]:
         return self._last_tools.get(session_id, [])
+
+    # ── Zuletzt gesendetes Bild (Telegram-Foto/Upload) für Rückfragen ────────
+    def set_last_image(self, session_id: str, data_uri: str, limit: int = 20) -> None:
+        """Merkt das zuletzt an diese Session geschickte Bild (data-URI), damit Folgefragen
+        es erneut ansehen können (analyze_image mit image_url="session")."""
+        if not session_id or not data_uri:
+            return
+        self._image[session_id] = {"uri": data_uri, "ts": time.time()}
+        while len(self._image) > limit:                    # Speicher begrenzen: älteste zuerst
+            oldest = min(self._image, key=lambda k: self._image[k]["ts"])
+            self._image.pop(oldest, None)
+
+    def get_last_image(self, session_id: str | None) -> str:
+        return (self._image.get(session_id) or {}).get("uri", "") if session_id else ""
 
     # ── Barge-in: laufenden Turn abbrechen ────────────────────────────────────
     def request_cancel(self, session_id: str) -> None:

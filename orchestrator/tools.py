@@ -544,11 +544,14 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "analyze_image",
             "description": "Analysiert ein Bild (multimodal) und beantwortet eine Frage dazu bzw. beschreibt es. "
-                           "Nutze dies für Bild-URLs (z.B. aus einer Webseite) — gib die vollständige Bild-URL an.",
+                           "Nutze dies für Bild-URLs (z.B. aus einer Webseite) — gib die vollständige Bild-URL an. "
+                           "Für ein Bild, das der Nutzer selbst geschickt hat (Telegram-Foto/Upload), setze "
+                           "image_url=\"session\" — damit siehst du das zuletzt gesendete Bild erneut an.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "image_url": {"type": "string", "description": "Vollständige Bild-URL (https://…)."},
+                    "image_url": {"type": "string", "description": "Vollständige Bild-URL (https://…) "
+                                                                  "oder \"session\" für das zuletzt gesendete Bild."},
                     "question": {"type": "string", "description": "Was möchtest du über das Bild wissen? (optional)"},
                 },
                 "required": ["image_url"],
@@ -1773,8 +1776,11 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
 
     if name == "analyze_image":
         image_url = (args.get("image_url") or "").strip()
-        if not image_url:
-            return "Fehler: Keine Bild-URL."
+        # „session" (oder leer) = das zuletzt in diesem Chat gesendete Bild (z.B. Telegram-Foto).
+        if not image_url or image_url.lower() in ("session", "last", "letztes", "letztes bild", "aktuelles bild"):
+            image_url = ctx.get("image") or hub.get_last_image(sid)
+            if not image_url:
+                return "In dieser Unterhaltung wurde kein Bild gesendet — bitte schicke mir eines."
         # GPU-Server hat kein Internet → Bild im Orchestrator laden und als data-URI senden.
         if image_url.startswith("http"):
             data_uri, err = await asyncio.to_thread(_fetch_image_data_uri, image_url)
@@ -1916,6 +1922,11 @@ def _format_browse(d: dict) -> str:
     if links:
         parts.append("Links: " + " · ".join(f"{l['text']}" for l in links[:15]))
     return "\n\n".join(parts)
+
+
+def image_data_uri(url: str) -> tuple[str | None, str | None]:
+    """Öffentlicher Wrapper für app.py: Bild-URL → (data-URI, Fehler)."""
+    return _fetch_image_data_uri(url)
 
 
 def _fetch_image_data_uri(url: str, max_bytes: int = 8_000_000) -> tuple[str | None, str | None]:
