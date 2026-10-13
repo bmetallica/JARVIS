@@ -211,7 +211,10 @@
             <div class="card tab hidden" data-tab="mcp">
                 <h2>MCP-Server</h2>
                 <p class="muted" style="font-size:12px">Externe MCP-Server (Streamable HTTP). Ihre Tools stehen dem
-                   Agenten zur Verfügung und lassen sich pro Gruppe als Recht <code>mcp:&lt;name&gt;</code> freigeben.</p>
+                   Agenten zur Verfügung und lassen sich pro Gruppe als Recht <code>mcp:&lt;name&gt;</code> freigeben.
+                   Mit <b>Zugangsschlüssel</b> kann ein Server seinen Endpunkt absichern: entweder der nackte Token
+                   (wird zu <code>Authorization: Bearer …</code>) oder ein JSON-Objekt für eigene Header, z. B.
+                   <code>{"X-Api-Key": "…"}</code>. Der Wert wird nur maskiert angezeigt.</p>
                 <div id="mcps"></div>
                 <div class="row">
                     <input id="new-mcp-name" placeholder="Name (z. B. smarthome)">

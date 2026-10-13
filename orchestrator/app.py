@@ -2700,6 +2700,24 @@ def admin_mcp_keywords(body: dict, jarvis_admin_token: str | None = Cookie(defau
     return {"ok": True, "servers": mcp_hub.list_servers(), "default_keywords": mcp_hub.DEFAULT_ACCEL_KEYWORDS}
 
 
+@app.post("/api/admin/mcp/headers")
+async def admin_mcp_headers(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Zugangsschlüssel eines MCP-Servers setzen (phase1.md Baustein 4).
+    Eingabe: nackter Token → Authorization: Bearer …, oder ein JSON-Objekt für eigene Header.
+    Leer = Header entfernen. Danach wird der Server neu verbunden."""
+    _admin(jarvis_admin_token)
+    name = (body or {}).get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name fehlt.")
+    try:
+        mcp_hub.set_headers(name, (body or {}).get("headers", ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    debug.log("mcp_headers_set", server=name, cleared=not bool((body or {}).get("headers", "").strip()))
+    await mcp_hub.refresh(name)
+    return {"ok": True, "servers": mcp_hub.list_servers()}
+
+
 @app.post("/api/admin/mcp/keywords/harvest")
 async def admin_mcp_keywords_harvest(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
     """Stichwörter automatisch aus den echten Gerätenamen des Servers befüllen (erweiterungen.md 6.1)."""

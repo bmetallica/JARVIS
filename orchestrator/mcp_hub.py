@@ -11,11 +11,12 @@ Verbindung pro Aufruf (Streamable HTTP) — einfach und robust.
 """
 from __future__ import annotations
 
+import json
 import re
 
 import store
 
-_cache: dict = {}          # server_name -> {"url": str, "enabled": bool, "tools": [ {name,description,inputSchema} ], "error": str|None }
+_cache: dict = {}          # server_name -> {"url", "enabled", "headers", "tools": [{name,description,inputSchema}], "error"}
 _init = False
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
@@ -48,7 +49,69 @@ def init() -> None:
             created_at TIMESTAMPTZ DEFAULT now());""")
         # Pro-Server-Stichwörter für die Vorauflösungs-Beschleunigung (NULL = Standardliste nutzen).
         c.execute("ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS accel_keywords TEXT;")
+        # Zugangsschlüssel als JSON-Header-Objekt, z.B. {"Authorization": "Bearer …"}
+        # (phase1.md Baustein 4) — NULL = ohne Header verbinden, wie bisher.
+        c.execute("ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS headers TEXT;")
     _init = True
+
+
+# ── Zugangsschlüssel (Header) ──────────────────────────────────────────────────
+
+def parse_headers(raw: str) -> dict:
+    """Eingabe aus dem Admin-UI → Header-Objekt. Zwei Schreibweisen sind erlaubt:
+    ein JSON-Objekt ({"X-Key": "…"}) oder einfach der nackte Token → Bearer-Header.
+    Leere Eingabe = keine Header."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+        except Exception as e:
+            raise ValueError(f"Kein gültiges JSON: {e}")
+        if not isinstance(obj, dict):
+            raise ValueError("JSON muss ein Objekt sein, z.B. {\"Authorization\": \"Bearer …\"}.")
+        out = {str(k): str(v) for k, v in obj.items() if str(k).strip()}
+        if not out:
+            raise ValueError("Das JSON-Objekt enthält keine Header.")
+        return out
+    return {"Authorization": f"Bearer {raw}"}
+
+
+def _headers_hint(raw: str | None) -> str:
+    """Maskierte Kurzfassung für die Admin-Liste: Header-Name + letzte 4 Zeichen."""
+    if not raw:
+        return ""
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return "(unlesbar)"
+    return ", ".join(f"{k}: …{str(v)[-4:]}" for k, v in (obj or {}).items())
+
+
+def headers_for(name: str) -> dict:
+    """Header dieses Servers (aus dem Cache, Fallback DB)."""
+    info = _cache.get(name) or {}
+    if "headers" in info:
+        return info.get("headers") or {}
+    init()
+    with store._conn() as c:
+        r = c.execute("SELECT headers FROM mcp_servers WHERE name=%s;", (name,)).fetchone()
+    try:
+        return json.loads(r[0]) if r and r[0] else {}
+    except Exception:
+        return {}
+
+
+def set_headers(name: str, raw: str) -> None:
+    """Zugangsschlüssel setzen (leer = entfernen). Wirft ValueError bei kaputtem JSON."""
+    hdrs = parse_headers(raw)
+    init()
+    with store._conn() as c:
+        c.execute("UPDATE mcp_servers SET headers=%s WHERE name=%s;",
+                  (json.dumps(hdrs) if hdrs else None, name))
+    if name in _cache:
+        _cache[name]["headers"] = hdrs
 
 
 # ── DB-Verwaltung ──────────────────────────────────────────────────────────────
@@ -56,14 +119,17 @@ def init() -> None:
 def list_servers() -> list[dict]:
     init()
     with store._conn() as c:
-        rows = c.execute("SELECT id, name, url, enabled, accel_keywords FROM mcp_servers ORDER BY name;").fetchall()
+        rows = c.execute("SELECT id, name, url, enabled, accel_keywords, headers "
+                         "FROM mcp_servers ORDER BY name;").fetchall()
     out = []
     for r in rows:
         info = _cache.get(r[1], {})
         out.append({"id": r[0], "name": r[1], "url": r[2], "enabled": r[3],
                     "tool_count": len(info.get("tools", [])), "error": info.get("error"),
                     "accel_keywords": r[4] or "", "accel_default": not bool(r[4]),
-                    "has_device_search": bool(device_search_tool(r[1]))})
+                    "has_device_search": bool(device_search_tool(r[1])),
+                    # Geheimnis NIE im Klartext ans UI — nur Namen der Header + maskierte Werte.
+                    "headers_hint": _headers_hint(r[5]), "has_headers": bool(r[5])})
     return out
 
 
@@ -201,10 +267,33 @@ def set_enabled(name: str, enabled: bool) -> None:
 
 # ── MCP-Verbindung ─────────────────────────────────────────────────────────────
 
-async def _fetch_tools(url: str) -> list[dict]:
+def _client_factory(extra: dict):
+    """httpx-Client-Factory, die die Zugangs-Header dieses Servers mitgibt.
+
+    WICHTIG: In mcp >= 1.28 ist `streamablehttp_client(url, headers=…)` als „deprecated and
+    will be ignored" markiert — die Header kommen dort NICHT mehr an (im Test nachgewiesen).
+    Eigene Header gehen nur noch über diese Factory."""
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    def factory(headers: dict | None = None, timeout=None, auth=None):
+        merged = dict(headers or {})
+        merged.update(extra or {})
+        return create_mcp_http_client(merged, timeout, auth)
+
+    return factory
+
+
+def _connect(url: str, headers: dict | None = None):
+    """Streamable-HTTP-Verbindung, mit Zugangs-Headern falls gesetzt."""
     from mcp.client.streamable_http import streamablehttp_client
+    if headers:
+        return streamablehttp_client(url, httpx_client_factory=_client_factory(headers))
+    return streamablehttp_client(url)
+
+
+async def _fetch_tools(url: str, headers: dict | None = None) -> list[dict]:
     from mcp import ClientSession
-    async with streamablehttp_client(url) as (r, w, _):
+    async with _connect(url, headers) as (r, w, _):
         async with ClientSession(r, w) as s:
             await s.initialize()
             res = await s.list_tools()
@@ -217,10 +306,9 @@ async def call_tool(server: str, tool: str, args: dict) -> str:
     info = _cache.get(server)
     if not info:
         return f"MCP-Server „{server}“ ist nicht konfiguriert."
-    from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
     try:
-        async with streamablehttp_client(info["url"]) as (r, w, _):
+        async with _connect(info["url"], info.get("headers")) as (r, w, _):
             async with ClientSession(r, w) as s:
                 await s.initialize()
                 result = await s.call_tool(tool, arguments=args or {})
@@ -242,14 +330,18 @@ async def refresh(name: str | None = None) -> None:
     """Tool-Listen (neu) laden. Ohne Name: alle Server."""
     init()
     with store._conn() as c:
-        rows = c.execute("SELECT name, url, enabled FROM mcp_servers"
+        rows = c.execute("SELECT name, url, enabled, headers FROM mcp_servers"
                          + (" WHERE name=%s" if name else "") + ";",
                          (name,) if name else ()).fetchall()
-    for n, url, enabled in rows:
-        entry = {"url": url, "enabled": enabled, "tools": [], "error": None}
+    for n, url, enabled, raw_hdrs in rows:
+        try:
+            hdrs = json.loads(raw_hdrs) if raw_hdrs else {}
+        except Exception:
+            hdrs = {}
+        entry = {"url": url, "enabled": enabled, "headers": hdrs, "tools": [], "error": None}
         if enabled:
             try:
-                entry["tools"] = await _fetch_tools(url)
+                entry["tools"] = await _fetch_tools(url, hdrs)
             except Exception as e:
                 entry["error"] = str(e)[:200]
         _cache[n] = entry

@@ -250,6 +250,10 @@ async function loadMcp() {
             <button class="small danger" data-delm="${s.name}">Entfernen</button></div>
             <div class="muted" style="font-size:11px">${s.url}${s.error ? " — " + s.error : ""}</div>
             <div class="row" style="margin-top:6px">
+              <input class="hdr-input" data-hdr="${s.name}" placeholder="${s.has_headers ? "gesetzt: " + (s.headers_hint || "") + " — neuer Wert überschreibt, \"-\" löscht" : "Zugangsschlüssel (Token oder JSON-Header) — leer = ohne"}" style="flex:1">
+              <button class="small" data-savehdr="${s.name}">🔑 Schlüssel</button>
+            </div>
+            <div class="row" style="margin-top:6px">
               <input class="kw-input" data-kw="${s.name}" value="${kwVal}" placeholder="${ph}" style="flex:1">
               <button class="small" data-savekw="${s.name}">⚡ Stichwörter</button>
               <button class="small secondary" data-harvestkw="${s.name}" title="Stichwörter automatisch aus den echten Gerätenamen befüllen">⛏ aus Geräten</button>
@@ -260,6 +264,15 @@ async function loadMcp() {
               <details><summary>Standardliste anzeigen</summary><code style="font-size:10px">${defKw}</code></details></div>`;
         el.appendChild(div);
     }
+    el.querySelectorAll("[data-savehdr]").forEach((b) => b.onclick = async () => {
+        const inp = el.querySelector(`.hdr-input[data-hdr="${CSS.escape(b.dataset.savehdr)}"]`);
+        const val = inp.value.trim();
+        if (!val && !confirm("Leeres Feld lässt den bisherigen Schlüssel unverändert. Zum Löschen \"-\" eintragen. Trotzdem senden?")) return;
+        b.disabled = true;
+        try { await api("POST", "/api/admin/mcp/headers", { name: b.dataset.savehdr, headers: val === "-" ? "" : val }); }
+        catch (e) { alert(e.message); }
+        b.disabled = false; inp.value = ""; await loadMcp();
+    });
     el.querySelectorAll("[data-delm]").forEach((b) => b.onclick = async () => {
         if (confirm("MCP-Server entfernen?")) { await api("POST", "/api/admin/mcp/delete", { name: b.dataset.delm }); await loadAdmin(); }
     });
