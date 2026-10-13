@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+import debug
+
 _PATH = Path(__file__).resolve().parent / "automations.json"
 SILENT_TOKEN = "SILENT"
 WEEKDAYS_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
@@ -267,17 +269,23 @@ class AutomationManager:
 
     # ── Scheduler-Loop ────────────────────────────────────────────────────────────
     async def _loop(self) -> None:
+        # Der Schleifenkörper ist abgesichert: eine Ausnahme hier würde den Task beenden und
+        # ALLE geplanten Selbstläufe lautlos stilllegen — der Dienst bliebe dabei „active".
+        # (Genau so ist am 2026-10-13 der Telegram-Poller verstummt.)
         while True:
             await asyncio.sleep(5)
-            if not self.enabled:
-                continue
-            now = _now()
-            for a in list(self._items.values()):
-                if not a.get("enabled"):
+            try:
+                if not self.enabled:
                     continue
-                nr = a.get("next_run")
-                if nr and nr <= now and a["id"] not in self._running:
-                    asyncio.create_task(self._run_one(a, None))
+                now = _now()
+                for a in list(self._items.values()):
+                    if not a.get("enabled"):
+                        continue
+                    nr = a.get("next_run")
+                    if nr and nr <= now and a["id"] not in self._running:
+                        asyncio.create_task(self._run_one(a, None))
+            except Exception as e:
+                debug.log("automation_loop_error", error=f"{type(e).__name__}: {e}"[:300])
 
     def start(self) -> None:
         if self._task is None or self._task.done():

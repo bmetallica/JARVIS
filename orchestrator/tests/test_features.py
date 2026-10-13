@@ -7,6 +7,7 @@ Lauf:  python3 tests/test_features.py       (Mini-Runner, exit!=0 bei Fehler)
 """
 import asyncio
 import os
+import pathlib
 import sys
 import tempfile
 import shutil
@@ -152,11 +153,92 @@ def test_external_marker_and_error_prefix():
     check("_looks_failed erkennt [FEHLER]", tools._looks_failed("[FEHLER] kaputt"))
 
 
+def test_telegram_poller_survives_handler_error():
+    """Eine kaputte Nachricht darf den Telegram-Poller NICHT beenden (Regression 2026-10-13:
+    ein TypeError aus einer Weiterleitung hat den Task getötet — danach kam gar nichts mehr an,
+    während der Dienst weiter „active" war)."""
+    import app
+    import debug
+    debug.enabled = True
+    sent, handled, calls = [], [], {"n": 0}
+    orig = (app.messaging.enabled, app.messaging.is_verified, app.messaging.send_to_chat,
+            app.messaging.get_updates, app._handle_telegram_update)
+    app.messaging.enabled = lambda: True
+    app.messaging.is_verified = lambda chat: True
+    app.messaging.send_to_chat = lambda chat, text: sent.append(text) or True
+
+    async def flaky(u):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("absichtlich kaputt")
+        handled.append(u.get("update_id"))
+
+    app._handle_telegram_update = flaky
+    served = {"done": False}
+
+    def get_updates(offset, limit):
+        if served["done"]:
+            raise asyncio.CancelledError
+        served["done"] = True
+        return [{"update_id": 1, "message": {"chat": {"id": 1}, "text": "a"}},
+                {"update_id": 2, "message": {"chat": {"id": 1}, "text": "b"}}]
+
+    app.messaging.get_updates = get_updates
+    try:
+        async def run():
+            try:
+                await asyncio.wait_for(app._telegram_poller(), timeout=20)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        asyncio.run(run())
+        check("beide Nachrichten zugestellt", calls["n"] == 2)
+        check("nach dem Fehler wird weiterverarbeitet", handled == [2])
+        check("Absender wird informiert", any("schiefgegangen" in s for s in sent))
+        check("Fehler landet im Protokoll",
+              any(e["kind"] == "telegram_handler_error" for e in debug.events()))
+    finally:
+        (app.messaging.enabled, app.messaging.is_verified, app.messaging.send_to_chat,
+         app.messaging.get_updates, app._handle_telegram_update) = orig
+
+
+def test_debug_log_kind_collision():
+    """debug.log(kind=…) darf nicht werfen: der Ereignistyp ist positions-only, ein
+    gleichnamiges Datenfeld landet harmlos in data (Regression 2026-10-13)."""
+    import debug
+    debug.enabled = True
+    debug.log("probe_kind", kind="text", prefix="rezept")
+    ev = debug.events()[-1]
+    check("kein TypeError bei kind= als Datenfeld", ev["kind"] == "probe_kind")
+    check("übriges Datenfeld bleibt erhalten", ev.get("prefix") == "rezept")
+
+
+def test_automation_loop_guarded():
+    """Der Scheduler-Schleifenkörper ist abgesichert — sonst legt eine Ausnahme alle
+    geplanten Selbstläufe lautlos still."""
+    import inspect
+    import automations
+    src = inspect.getsource(automations.AutomationManager._loop)
+    check("Scheduler-Loop fängt Ausnahmen", "except Exception" in src)
+    check("Scheduler-Loop protokolliert sie", "automation_loop_error" in src)
+
+
+def _isolate_logs():
+    """Testläufe dürfen NICHT ins Betriebs-Protokoll schreiben — sonst stehen erfundene
+    Ereignisse (etwa eine Weiterleitung mit HTTP 500) in logs/events-*.jsonl und führen bei
+    der nächsten echten Fehlersuche in die Irre."""
+    import tempfile
+    import debug
+    debug._LOG_DIR = pathlib.Path(tempfile.mkdtemp(prefix="jarvis-test-logs-"))
+
+
 def main():
+    _isolate_logs()
     tests = [test_switch_vs_read_classification, test_unverified_failure_retry, test_fast_confirm,
              test_plugin_cron_trigger, test_obsidian_categories_daily_search,
              test_bus_unsubscribe_and_rate, test_session_prune, test_config_secret_masking,
-             test_external_marker_and_error_prefix]
+             test_external_marker_and_error_prefix,
+             test_telegram_poller_survives_handler_error, test_debug_log_kind_collision,
+             test_automation_loop_guarded]
     for t in tests:
         print(f"\n## {t.__name__}")
         try:

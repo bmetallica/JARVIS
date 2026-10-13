@@ -9,6 +9,7 @@ Lauf:  python3 tests/test_phase1.py       (Mini-Runner, exit!=0 bei Fehler)
 """
 import asyncio
 import os
+import pathlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -316,7 +317,17 @@ def test_mcp_headers_reach_the_client():
         asyncio.run(client.aclose())
 
 
+def _isolate_logs():
+    """Testläufe dürfen NICHT ins Betriebs-Protokoll schreiben — sonst stehen erfundene
+    Ereignisse (etwa eine Weiterleitung mit HTTP 500) in logs/events-*.jsonl und führen bei
+    der nächsten echten Fehlersuche in die Irre."""
+    import tempfile
+    import debug
+    debug._LOG_DIR = pathlib.Path(tempfile.mkdtemp(prefix="jarvis-test-logs-"))
+
+
 def main():
+    _isolate_logs()
     tests = [test_pdf_text_and_pages, test_pdf_errors, test_pdf_scan_ocr,
              test_session_document_memory, test_mcp_session_attachments,
              test_forward_matching, test_forward_post_and_errors,

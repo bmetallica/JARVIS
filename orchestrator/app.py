@@ -19,6 +19,7 @@ import json
 import re
 import secrets
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2382,27 +2383,52 @@ async def _telegram_poller() -> None:
             continue
         for u in updates:
             offset = u.get("update_id", offset) + 1
-            m = u.get("message") or u.get("edited_message") or {}
-            chat = (m.get("chat") or {}).get("id")
-            txt = m.get("text")
-            voice = m.get("voice") or m.get("audio")          # Sprachnachricht / Audiodatei
-            doc = m.get("document") or {}
-            photo = m.get("photo") or (doc if str(doc.get("mime_type", "")).startswith("image/") else None)
-            frm = m.get("from") or {}
-            sender = (frm.get("username") and "@" + frm["username"]) or \
-                     " ".join(filter(None, [frm.get("first_name"), frm.get("last_name")])) or ""
-            if chat and photo:                                # Foto/Bild-Datei (ggf. mit Aufgabe als Bildunterschrift)
-                await _handle_telegram_photo(chat, m, sender)
-            elif chat and txt:
-                await _handle_telegram_message(chat, txt, sender)
-            elif chat and voice:
-                await _handle_telegram_voice(chat, voice, sender)
-            elif chat and documents.is_pdf(doc.get("file_name") or "", doc.get("mime_type") or ""):
-                await _handle_telegram_document(chat, m, sender)       # PDF (Baustein 1)
-            elif chat and doc and await asyncio.to_thread(messaging.is_verified, chat):
-                await asyncio.to_thread(messaging.send_to_chat, chat,
-                                        "Diese Datei kann ich noch nicht verarbeiten — "
-                                        "Text, Sprachnachrichten, Bilder und PDFs gehen aber.")
+            # EINE kaputte Nachricht darf den Poller NICHT beenden. Am 2026-10-13 hat ein
+            # TypeError aus einer Weiterleitung den Task sterben lassen — danach kam gar
+            # nichts mehr an, ohne dass der Dienst „down" gewesen wäre. Darum: jede Nachricht
+            # einzeln abgesichert, Fehler ins Log, und der Absender bekommt Bescheid.
+            try:
+                await _handle_telegram_update(u)
+            except Exception as e:
+                m = u.get("message") or u.get("edited_message") or {}
+                chat = (m.get("chat") or {}).get("id")
+                debug.log("telegram_handler_error", chat=chat, update=u.get("update_id"),
+                          error=f"{type(e).__name__}: {e}"[:300])
+                traceback.print_exc()
+                if chat:
+                    try:
+                        if await asyncio.to_thread(messaging.is_verified, chat):
+                            await asyncio.to_thread(
+                                messaging.send_to_chat, chat,
+                                "Da ist bei mir intern etwas schiefgegangen — die Nachricht "
+                                "konnte ich nicht verarbeiten. Der Fehler steht in meinem Protokoll.")
+                    except Exception:
+                        pass
+
+
+async def _handle_telegram_update(u: dict) -> None:
+    """Eine einzelne Telegram-Nachricht einsortieren: Foto, Text, Sprache, PDF, sonst Absage."""
+    m = u.get("message") or u.get("edited_message") or {}
+    chat = (m.get("chat") or {}).get("id")
+    txt = m.get("text")
+    voice = m.get("voice") or m.get("audio")              # Sprachnachricht / Audiodatei
+    doc = m.get("document") or {}
+    photo = m.get("photo") or (doc if str(doc.get("mime_type", "")).startswith("image/") else None)
+    frm = m.get("from") or {}
+    sender = (frm.get("username") and "@" + frm["username"]) or \
+             " ".join(filter(None, [frm.get("first_name"), frm.get("last_name")])) or ""
+    if chat and photo:                                    # Foto/Bild-Datei (ggf. mit Aufgabe als Bildunterschrift)
+        await _handle_telegram_photo(chat, m, sender)
+    elif chat and txt:
+        await _handle_telegram_message(chat, txt, sender)
+    elif chat and voice:
+        await _handle_telegram_voice(chat, voice, sender)
+    elif chat and documents.is_pdf(doc.get("file_name") or "", doc.get("mime_type") or ""):
+        await _handle_telegram_document(chat, m, sender)           # PDF (Baustein 1)
+    elif chat and doc and await asyncio.to_thread(messaging.is_verified, chat):
+        await asyncio.to_thread(messaging.send_to_chat, chat,
+                                "Diese Datei kann ich noch nicht verarbeiten — "
+                                "Text, Sprachnachrichten, Bilder und PDFs gehen aber.")
 
 
 @app.websocket("/ws/satellite")

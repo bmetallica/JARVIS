@@ -37,6 +37,7 @@ _PERSIST_KINDS = {"turn", "turn_done", "llm", "llm_error", "retry", "tool", "too
                   "telegram_document_in", "document_read", "document_error",
                   "document_ocr_error", "mcp_attachment", "mcp_headers_set",
                   "forward", "forward_error", "forward_rules_set",
+                  "telegram_handler_error", "automation_loop_error",
                   "event_fire", "event_fire_denied", "event_token_rotated"}
 
 # Felder, die Nutzer-Inhalte enthalten — bei aktivem log_redact aus den JSONL-Logs entfernt
@@ -138,7 +139,7 @@ def _append_jsonl(kind: str, data: dict) -> None:
         cfg = _cfg()
         _cleanup_old_logs(cfg)
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
-        rec = _redact({"t": round(time.time(), 3), "kind": kind, **data}, cfg)
+        rec = _redact({"t": round(time.time(), 3), **data, "kind": kind}, cfg)
         path = _LOG_DIR / f"events-{time.strftime('%Y%m%d')}.jsonl"
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
@@ -146,8 +147,15 @@ def _append_jsonl(kind: str, data: dict) -> None:
         pass     # Observability darf den Betrieb nie stören
 
 
-def log(kind: str, **data) -> None:
-    """Zentrale Aufzeichnung. Speist Ring-Puffer (wenn an), Metriken (immer) und JSONL (wichtige Kinds)."""
+def log(kind: str, /, **data) -> None:
+    """Zentrale Aufzeichnung. Speist Ring-Puffer (wenn an), Metriken (immer) und JSONL (wichtige Kinds).
+
+    `kind` ist POSITIONS-ONLY (das `/`): Ein Aufrufer, der versehentlich ein eigenes Feld
+    `kind=…` mitgibt, bekam sonst ein `TypeError: log() got multiple values for argument
+    'kind'` — und wenn das in einem Hintergrund-Task passiert, stirbt der Task.
+    Genau so ist am 2026-10-13 der Telegram-Poller verstummt. Jetzt landet so ein Feld
+    einfach in `data` und wird unten vom echten Ereignistyp überschrieben, statt zu werfen.
+    """
     try:
         with _lock:
             _update_metrics(kind, data)
@@ -160,7 +168,7 @@ def log(kind: str, **data) -> None:
     global _seq
     with _lock:
         _seq += 1
-        _events.append({"id": _seq, "t": round(time.time(), 3), "kind": kind, **data})
+        _events.append({"id": _seq, "t": round(time.time(), 3), **data, "kind": kind})
 
 
 def events() -> list[dict]:
