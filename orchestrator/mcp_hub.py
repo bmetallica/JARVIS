@@ -440,6 +440,18 @@ def _schema_for_full(full_name: str) -> dict | None:
     return None
 
 
+def input_properties(server: str, tool: str) -> set[str]:
+    """Parameternamen, die das inputSchema dieses MCP-Tools wirklich deklariert.
+    Grundlage für den Schutz beim Einsetzen von Session-Anhängen (phase1.md Baustein 2):
+    ersetzt wird nur, was das Tool auch kennt. Leere Menge = Schema unbekannt."""
+    info = _cache.get(server) or {}
+    for x in info.get("tools", []):
+        if x["name"] == tool:
+            props = ((x.get("inputSchema") or {}).get("properties") or {})
+            return set(props.keys())
+    return set()
+
+
 def schemas_for(names) -> list[dict]:
     """Schemas der per load_mcp_tools geladenen MCP-Tools (für den Tool-Loop)."""
     out = []
