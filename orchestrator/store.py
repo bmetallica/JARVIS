@@ -243,3 +243,28 @@ def delete_source(source: str, namespace: str = "default") -> int:
     with _conn() as c:
         cur = c.execute("DELETE FROM vectors WHERE namespace=%s AND source=%s;", (namespace, source))
         return cur.rowcount
+
+
+def delete_namespace(namespace: str, like: bool = False) -> int:
+    """Alle Vektoren eines Namespace löschen (like=True → Präfix-Muster, z.B. 'plugin:adhs:%').
+    Für Aufräumen beim Löschen von Nutzern/Plugins (erweiterungen.md 2.3)."""
+    init()
+    with _conn() as c:
+        if like:
+            cur = c.execute("DELETE FROM vectors WHERE namespace LIKE %s;", (namespace,))
+        else:
+            cur = c.execute("DELETE FROM vectors WHERE namespace=%s;", (namespace,))
+        return cur.rowcount
+
+
+def history_housekeeping(keep_per_session: int = 200, retention_days: int = 90) -> tuple[int, int]:
+    """chat_history begrenzen: (a) pro Session auf die neuesten `keep_per_session` Zeilen kappen,
+    (b) Zeilen älter als `retention_days` löschen. Gibt (gekappt, veraltet) zurück (erweiterungen.md 2.1)."""
+    _history_init()
+    with _conn() as c:
+        cur1 = c.execute("""DELETE FROM chat_history ch USING (
+            SELECT id, row_number() OVER (PARTITION BY session_id ORDER BY id DESC) rn
+            FROM chat_history) t WHERE ch.id=t.id AND t.rn > %s;""", (keep_per_session,))
+        cur2 = c.execute("DELETE FROM chat_history WHERE created_at < now() - (%s||' days')::interval;",
+                         (str(int(retention_days)),))
+        return cur1.rowcount, cur2.rowcount

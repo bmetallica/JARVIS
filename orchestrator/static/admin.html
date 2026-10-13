@@ -43,6 +43,7 @@
 
         <!-- Verwaltung -->
         <section id="view-admin" class="hidden">
+            <div id="first-run" class="card hidden" style="border-left:4px solid var(--ok);font-size:13px;padding:10px 14px"></div>
             <nav class="adminnav">
                 <button class="navbtn active" data-tab="system">⚙ System</button>
                 <button class="navbtn" data-tab="models">🧠 Modelle</button>
@@ -186,6 +187,8 @@
                     <button id="btn-debug-refresh" class="small">↻ Aktualisieren</button>
                     <button id="btn-debug-clear" class="small danger">Leeren</button>
                     <label class="inline"><input type="checkbox" id="debug-auto"> Auto-Refresh (3 s)</label>
+                    <select id="debug-kind" title="Nach Ereignis-Typ filtern"><option value="">alle Typen</option></select>
+                    <input id="debug-filter" placeholder="Filter (Session, Tool, Text …)" style="max-width:220px">
                 </div>
                 <pre id="debug-log" style="max-height:55vh;overflow:auto;background:#000d12;border:1px solid #243446;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;margin-top:10px"></pre>
             </div>
@@ -288,6 +291,12 @@
                        laden (SSRF-Schutz). Für ein Heimnetz kannst du den Zugriff auf interne LAN-Adressen (z.B.
                        192.168.x.x — Router, NAS, Geräteseiten) erlauben. Loopback bleibt gesperrt.</p>
                     <label class="inline"><input type="checkbox" id="cfg-fetch_allow_lan"> Interne LAN-Adressen für fetch_url erlauben</label>
+                </fieldset>
+                <fieldset><legend>Plugin-Gateway (/api/v1)</legend>
+                    <p class="muted" style="font-size:11px">Erlaubte Browser-Origins für Plugin-PWAs (CORS), kommagetrennt.
+                       <code>*</code> = alle (Bearer-Auth, keine Cookies). Nach Livegang eines Plugins auf dessen
+                       konkrete Adresse einschränken, z.B. <code>http://192.168.66.224:8096</code>.</p>
+                    <label>CORS-Origins <input id="cfg-plugin-cors" placeholder="*"></label>
                 </fieldset>
                 <fieldset><legend>Messaging-Kanal (Telegram)</legend>
                     <p class="muted" style="font-size:11px">Fester, geräteunabhängiger Kommunikationsweg: JARVIS meldet

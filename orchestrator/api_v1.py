@@ -2,7 +2,7 @@
 JARVIS Plugin-Gateway — versionierte, authentifizierte Fassade /api/v1/* vor den
 Core-Subsystemen (LLM, Vision, STT/TTS, RAG, Storage, Notify, Tools, Events, Scheduler).
 
-Auth: Bearer-API-Key (plugins_registry.verify_key). Autorisierung = Key-Scopes UND
+Auth: Bearer-API-Key (plugins_registry.verify_key_cached). Autorisierung = Key-Scopes UND
 Nutzerrechte (auth.is_tool_allowed). Vollständige Spezifikation: ../pluginsystem.md.
 
 app.py injiziert über set_hooks() die Funktionen, die im app-Modul leben
@@ -71,7 +71,7 @@ async def _resolve(authorization: str | None, x_user: str | None) -> PluginCtx:
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
-    key = await asyncio.to_thread(registry.verify_key, token)
+    key = await asyncio.to_thread(registry.verify_key_cached, token)
     if not key:
         raise HTTPException(status_code=401, detail="Ungültiger oder fehlender Plugin-API-Key.")
     # Nutzer bestimmen: X-JARVIS-User (nur mit api:act_as_user) > Key-Bindung > Gast
@@ -177,14 +177,21 @@ async def inference_structure(body: dict, authorization: str | None = Header(Non
             "SCHEMA:\n" + json.dumps(schema, ensure_ascii=False))
     working = [{"role": "system", "content": sysp},
                {"role": "user", "content": text}]
-    raw = await asyncio.to_thread(services.chat, working, cfg)
-    parsed = _extract_json(raw)
-    if parsed is None:
-        # Ein Repair-Versuch
-        working.append({"role": "assistant", "content": raw})
-        working.append({"role": "user", "content": "Das war kein gültiges JSON. Gib NUR das JSON aus."})
+    # Bevorzugt: Grammatik-erzwungenes JSON (ein Durchgang, garantiert valide — erweiterungen.md 11.4).
+    parsed = None
+    try:
+        raw = await asyncio.to_thread(services.chat_json, working, cfg, schema)
+        parsed = _extract_json(raw)
+    except Exception:
+        parsed = None
+    if parsed is None:                        # Fallback: Prompt + ein Repair-Versuch (alte Server)
         raw = await asyncio.to_thread(services.chat, working, cfg)
         parsed = _extract_json(raw)
+        if parsed is None:
+            working.append({"role": "assistant", "content": raw})
+            working.append({"role": "user", "content": "Das war kein gültiges JSON. Gib NUR das JSON aus."})
+            raw = await asyncio.to_thread(services.chat, working, cfg)
+            parsed = _extract_json(raw)
     if parsed is None:
         return _err(502, "structure_failed", "Modell lieferte kein gültiges JSON.")
     return parsed
@@ -612,7 +619,7 @@ async def plugin_ws(ws: WebSocket):
         auth_h = ws.headers.get("authorization", "")
         if auth_h.lower().startswith("bearer "):
             token = auth_h[7:].strip()
-    key = await asyncio.to_thread(registry.verify_key, token)
+    key = await asyncio.to_thread(registry.verify_key_cached, token)
     if not key or not registry.has_scope(key, "api:events"):
         await ws.close(code=4401)
         return
@@ -641,8 +648,7 @@ async def plugin_ws(ws: WebSocket):
             if op == "subscribe":
                 plugin_bus.add_topics(sub_id, msg.get("topics") or [])
             elif op == "unsubscribe":
-                # neu setzen ohne die genannten
-                pass
+                plugin_bus.remove_topics(sub_id, msg.get("topics") or [])
             elif op == "publish":
                 topic = msg.get("topic") or ""
                 # Plugins dürfen nur in ihren eigenen Namespace publizieren

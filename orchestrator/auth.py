@@ -46,6 +46,11 @@ def _verify(password: str, salt_hex: str, hash_hex: str) -> bool:
     return secrets.compare_digest(_hash(password, bytes.fromhex(salt_hex)), hash_hex)
 
 
+def _token_hash(token: str) -> str:
+    """Sessions werden per SHA-256-Hash persistiert (nie der Klartext-Token)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 # ── Schema + Seed ─────────────────────────────────────────────────────────────
 
 def init() -> None:
@@ -75,6 +80,14 @@ def init() -> None:
             c.execute("""CREATE TABLE IF NOT EXISTS group_permissions (
                 group_id BIGINT REFERENCES groups(id) ON DELETE CASCADE,
                 resource TEXT NOT NULL, PRIMARY KEY (group_id, resource));""")
+            # Persistente Login-Sessions (überleben Orchestrator-Neustarts; erweiterungen.md 1.1).
+            c.execute("""CREATE TABLE IF NOT EXISTS auth_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                username TEXT NOT NULL, is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+                must_change BOOLEAN NOT NULL DEFAULT FALSE,
+                exp DOUBLE PRECISION NOT NULL);""")
+            c.execute("DELETE FROM auth_sessions WHERE exp < %s;", (time.time(),))
             # Seed: Admin-Gruppe + admin/admin (nur wenn noch keine Nutzer existieren)
             n = c.execute("SELECT COUNT(*) FROM users;").fetchone()[0]
             if n == 0:
@@ -125,6 +138,13 @@ def login(username: str, password: str) -> dict | None:
             "must_change": row[3], "exp": time.time() + _TOKEN_TTL}
     with _lock:
         _sessions[token] = sess
+    try:                                                       # persistieren (neustart-fest)
+        with store._conn() as c:
+            c.execute("""INSERT INTO auth_sessions (token_hash, user_id, username, is_admin, must_change, exp)
+                VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (token_hash) DO NOTHING;""",
+                      (_token_hash(token), uid, username, sess["is_admin"], bool(row[3]), sess["exp"]))
+    except Exception:
+        pass
     return {"token": token, **sess}
 
 
@@ -133,17 +153,34 @@ def session(token: str | None) -> dict | None:
         return None
     with _lock:
         s = _sessions.get(token)
-        if not s:
-            return None
-        if s["exp"] < time.time():
-            _sessions.pop(token, None)
-            return None
-        return s
+        if s:
+            if s["exp"] < time.time():
+                _sessions.pop(token, None)
+                return None
+            return s
+    # RAM-Miss (z.B. nach Neustart) → aus der DB nachladen (erweiterungen.md 1.1)
+    try:
+        with store._conn() as c:
+            r = c.execute("SELECT user_id, username, is_admin, must_change, exp FROM auth_sessions "
+                          "WHERE token_hash=%s;", (_token_hash(token),)).fetchone()
+    except Exception:
+        return None
+    if not r or r[4] < time.time():
+        return None
+    s = {"user_id": r[0], "username": r[1], "is_admin": r[2], "must_change": r[3], "exp": r[4]}
+    with _lock:
+        _sessions[token] = s
+    return s
 
 
 def logout(token: str) -> None:
     with _lock:
         _sessions.pop(token, None)
+    try:
+        with store._conn() as c:
+            c.execute("DELETE FROM auth_sessions WHERE token_hash=%s;", (_token_hash(token),))
+    except Exception:
+        pass
 
 
 def change_password(user_id: int, new_password: str) -> None:
@@ -151,11 +188,16 @@ def change_password(user_id: int, new_password: str) -> None:
     with store._conn() as c:
         c.execute("UPDATE users SET password_hash=%s, salt=%s, must_change_password=FALSE WHERE id=%s;",
                   (h, s, user_id))
-    # offene Sessions des Nutzers als 'geändert' markieren
+    # offene Sessions des Nutzers als 'geändert' markieren (RAM + persistiert)
     with _lock:
         for sess in _sessions.values():
             if sess["user_id"] == user_id:
                 sess["must_change"] = False
+    try:
+        with store._conn() as c:
+            c.execute("UPDATE auth_sessions SET must_change=FALSE WHERE user_id=%s;", (user_id,))
+    except Exception:
+        pass
 
 
 # ── Nutzer / Gruppen / Rechte ──────────────────────────────────────────────────
@@ -234,6 +276,13 @@ def is_admin(user_id: int) -> bool:
 def delete_user(user_id: int) -> None:
     with store._conn() as c:
         c.execute("DELETE FROM users WHERE id=%s;", (user_id,))
+    # Verwaiste Daten mitlöschen: Embeddings-Namespace + Verlauf des Nutzers (erweiterungen.md 2.3)
+    try:
+        store.delete_namespace(f"u{user_id}")
+        with store._conn() as c:
+            c.execute("DELETE FROM chat_history WHERE user_key=%s;", (str(user_id),))
+    except Exception:
+        pass
 
 
 def set_user_groups(user_id: int, group_ids: list[int]) -> None:

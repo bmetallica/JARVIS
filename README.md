@@ -19,7 +19,7 @@ und Sprachsatelliten (Raspberry Pi & ESP32-S3, Wake-Word „**Jarvis**").
 - 🔌 **MCP-Hub**: externe [Model-Context-Protocol](https://modelcontextprotocol.io)-Server als Tools (z. B. Smart-Home).
 - 🖥️ **Client-Agent**: steuert PCs (App-Start, Shell, Fenster, Medien, Zwischenablage …) über eine Capability-Registry.
 - 📡 **Sprachsatelliten**: Raspberry Pi & **ESP32-S3** (Waveshare Audio-Board) mit On-Device-Wake-Word, RGB-Status und Rückkanal (Timer/Benachrichtigungen werden am Gerät gesprochen).
-- 💬 **Telegram-Kanal**: geräteunabhängig, ein- und ausgehend.
+- 💬 **Telegram-Kanal**: geräteunabhängig, ein- und ausgehend — Text, Sprachnachrichten und **Fotos** (Bildunterschrift = Aufgabe, z. B. „Was steht auf dem Schild?“ / „Notier das in Obsidian“).
 - 🛡️ **Auth & Admin-UI**: Nutzer/Gruppen/Rechte, Geräteverwaltung, Debug-Trace — alles im Browser.
 
 ---
@@ -132,6 +132,20 @@ cd deploy/sandbox && docker compose up -d --build   # lauscht auf 127.0.0.1:8090
 - **ESP32-S3**: siehe ESP-README; Build/Flash via VS Code (ESP-IDF-Extension) oder `idf.py build flash monitor`.
 
 ---
+
+## 🧩 Pluginsystem (/api/v1)
+
+Externe Apps (z. B. der geplante **ADHS-Helper** als PWA) nutzen JARVIS über ein versioniertes,
+Bearer-Key-authentifiziertes Gateway: LLM/Vision/STT/TTS, RAG, KV-Storage, Notify (Telegram/Satellit),
+Tools, Scheduler und ein Event-WebSocket — verwaltet im Admin-UI (Tab 🧩, inkl. Rate-Limits & Telemetrie).
+Vollständige Spezifikation + Template: [`pluginsystem.md`](./pluginsystem.md) · `deploy/plugin-example/`.
+
+## 🗒️ Wartung & Weiterentwicklung
+
+Der Projekt-Review mit allen Verbesserungen (umgesetzt + Backlog) liegt in
+[`erweiterungen.md`](./erweiterungen.md); bekannte Probleme + Lösungen in [`problems.md`](./problems.md).
+Tests: `orchestrator/tests/` (`run_unit.py`, `test_plugins.py`, `test_features.py`,
+Eval-Harness `eval_tool_selection.py`).
 
 ## 🔐 Sicherheit & Hinweise
 

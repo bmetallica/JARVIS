@@ -30,7 +30,10 @@ ohne Reasoning; (c) ähnlich klingende Tools („Systeme/Geräte").
 
 ---
 
-## 2. 🔴 Tool-Auswahl nur MIT Reasoning zuverlässig — `adaptive` ohne Denken patzt  `[teilweise]`
+## 2. 🔴 Tool-Auswahl nur MIT Reasoning zuverlässig — `adaptive` ohne Denken patzt  `[weitgehend erledigt 2026-07-02]`
+> **Update 2026-06-28/07-02:** Smart-Home per Geräte-Vorauflösung + vorgeladenen MCP-Tools stabil (0–1 Calls);
+> Lese-/Messfragen erzwingen kurzes Denken; **halluzinierte Fehlschläge** („nicht erreichbar" ohne Tool-Beleg)
+> lösen jetzt automatisch den Denk-Retry aus (`_is_unverified_failure`, erweiterungen.md 1.2).
 **Symptom (verifiziert):** Mit `think=true` wählte das Modell **2/2 korrekt** den DPM-Skill und antwortete
 sauber („17 Systeme mit Updates: pihole 102, Entwicklung 55 …"). Im `adaptive`-Schnell-Pass (ohne Denken)
 wählte es wiederholt das falsche Tool. Eine plausible Fehl-Antwort eskaliert NICHT automatisch auf Denken
@@ -63,7 +66,9 @@ Anfrage nie beantwortet.
 
 ---
 
-## 4. 🔴 GPU-Server: 502 / Kaltstarts durch Modell-Swapping (llama-swap)  `[teilweise]`
+## 4. 🔴 GPU-Server: 502 / Kaltstarts durch Modell-Swapping (llama-swap)  `[teilweise; Keepalive verfügbar 2026-07-02]`
+> **Update:** optionaler Warmhalte-Ping (`llm_keepalive_s` > 0, nur bei jüngster Aktivität) implementiert —
+> bewusst Default aus, damit andere Apps (Coding-Modell) ungestört swappen können.
 **Symptom (real, mehrfach):** `502 Bad Gateway` von `192.168.66.225:8080` mitten in Läufen — typisch, wenn
 llama-swap ein Modell erst laden muss.
 
@@ -96,7 +101,10 @@ begrenzt mit „im Skill filtern"-Hinweis; DPM-Skill auf `pu>0`-Filter umgebaut 
 
 ---
 
-## 6. 🟡 Latenz (Denken ~5–8 s, mehrstufige Tool-Loops, begrenzter Durchsatz)  `[offen]`
+## 6. 🟡 Latenz (Denken ~5–8 s, mehrstufige Tool-Loops, begrenzter Durchsatz)  `[verbessert 2026-07-02]`
+> **Update:** Smart-Home 34 s → ~11 s (Schalten, No-Think + idx-Vorauflösung) bzw. ~7 s warm (Lesen);
+> **Fast-Confirm** spart die LLM-Bestätigungsrunde nach Schaltbefehlen (erweiterungen.md 4.2); optionaler
+> LLM-Keepalive gegen Kaltstarts (`llm_keepalive_s`, Default aus).
 **Lösungen ohne Hardware:**
 - **Hybrid bleibt sinnvoll:** einfache Turns schnell (ohne Denken), nur Agenten-Turns mit Denken (Punkt 2).
 - **Tool-Anzahl/Schema-Größe senken** (Punkt 1) → kürzerer Prompt → schneller + billiger.

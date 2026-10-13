@@ -140,7 +140,7 @@ def list_plugins() -> list[dict]:
             COALESCE((SELECT COUNT(*) FROM plugin_api_keys k WHERE k.plugin_id=p.id AND NOT k.revoked),0)
             FROM plugins p ORDER BY p.id;""").fetchall()
     return [{"id": r[0], "name": r[1], "version": r[2], "type": r[3], "enabled": r[4],
-             "active_keys": r[5]} for r in rows]
+             "active_keys": r[5], "telemetry": telemetry_for(r[0])} for r in rows]
 
 
 def set_enabled(pid: str, enabled: bool) -> None:
@@ -154,6 +154,10 @@ def delete(pid: str) -> None:
     with store._conn() as c:
         c.execute("DELETE FROM plugins WHERE id=%s;", (pid,))      # CASCADE löscht Keys
         c.execute("DELETE FROM plugin_kv WHERE plugin_id=%s;", (pid,))
+    try:                                                           # RAG-Namespaces des Plugins (2.3)
+        store.delete_namespace(f"plugin:{pid}:%", like=True)
+    except Exception:
+        pass
 
 
 # ── API-Keys ──────────────────────────────────────────────────────────────────
@@ -206,30 +210,101 @@ def set_key_scopes(kid: str, scopes: list[str]) -> None:
 
 def verify_key(token: str | None) -> dict | None:
     """Bearer-Token prüfen. Gibt {kid, plugin_id, scopes, user_binding} oder None.
-    Schnellfilter über das eingebettete Plugin-Präfix, dann Hash-Vergleich."""
+    Kandidaten-Filter in Python (Plugin-id kann '_'/LIKE-Wildcards enthalten → kein SQL-LIKE,
+    erweiterungen.md 3.5), dann Hash-Vergleich."""
     if not token or not token.startswith("jvp_"):
         return None
     init()
-    # jvp_<plugin>_<rand> → Plugin-Präfix herauslösen (Plugin-id kann '_' enthalten,
-    # daher gegen die Kandidaten der DB matchen statt blind zu splitten).
     with store._conn() as c:
         rows = c.execute("""SELECT k.kid, k.plugin_id, k.hash, k.salt, k.scopes, k.user_binding,
-            k.revoked, k.expires_at, p.enabled
+            k.expires_at
             FROM plugin_api_keys k JOIN plugins p ON p.id=k.plugin_id
-            WHERE NOT k.revoked AND p.enabled
-              AND %s LIKE 'jvp_'||k.plugin_id||'_%%';""", (token,)).fetchall()
+            WHERE NOT k.revoked AND p.enabled;""").fetchall()
     now = time.time()
-    for kid, pid, h, salt, scopes, ub, revoked, exp, enabled in rows:
+    for kid, pid, h, salt, scopes, ub, exp in rows:
+        if not token.startswith(f"jvp_{pid}_"):
+            continue
         if exp is not None and exp.timestamp() < now:
             continue
         if _verify(token, salt, h):
-            try:
-                with store._conn() as c:
-                    c.execute("UPDATE plugin_api_keys SET last_used=now() WHERE kid=%s;", (kid,))
-            except Exception:
-                pass
+            _touch_last_used(kid)
             return {"kid": kid, "plugin_id": pid, "scopes": set(scopes or []), "user_binding": ub}
     return None
+
+
+# ── Verify-Cache + Rate-Limit (erweiterungen.md 4.4/3.3) ──────────────────────
+# PBKDF2 kostet ~50–100 ms CPU pro Aufruf — pollende Plugin-Clients (PWA) würden das pro Request
+# zahlen. 60-s-Cache auf den Token-Hash; last_used höchstens 1×/Minute geschrieben.
+_verify_cache: dict = {}          # sha256(token) -> (keyinfo, cached_at)
+_VERIFY_TTL = 60
+_last_used_written: dict = {}     # kid -> ts
+
+
+def _touch_last_used(kid: str) -> None:
+    now = time.time()
+    if now - _last_used_written.get(kid, 0) < 60:
+        return
+    _last_used_written[kid] = now
+    try:
+        with store._conn() as c:
+            c.execute("UPDATE plugin_api_keys SET last_used=now() WHERE kid=%s;", (kid,))
+    except Exception:
+        pass
+
+
+def verify_key_cached(token: str | None) -> dict | None:
+    """Wie verify_key, aber mit kurzem Cache (Revoke/Disable wirkt nach spätestens 60 s)."""
+    if not token:
+        return None
+    th = hashlib.sha256(token.encode()).hexdigest()
+    hit = _verify_cache.get(th)
+    now = time.time()
+    if hit and now - hit[1] < _VERIFY_TTL:
+        if hit[0]:
+            _touch_last_used(hit[0]["kid"])
+        return hit[0]
+    ki = verify_key(token)
+    _verify_cache[th] = (ki, now)
+    if len(_verify_cache) > 500:                    # simple Kappung
+        _verify_cache.clear()
+    return ki
+
+
+_rate_buckets: dict = {}          # (kid, heavy) -> [timestamps]
+
+# ── Leichte Telemetrie pro Plugin (erweiterungen.md 5.3; in-memory, im Admin-Tab sichtbar) ──
+_telemetry: dict = {}             # plugin_id -> {"calls": n, "errors": n, "last": ts}
+
+
+def telemetry_bump(plugin_id: str, error: bool = False) -> None:
+    t = _telemetry.setdefault(plugin_id, {"calls": 0, "errors": 0, "last": 0.0})
+    t["calls"] += 1
+    if error:
+        t["errors"] += 1
+    t["last"] = time.time()
+
+
+def telemetry_for(plugin_id: str) -> dict:
+    t = _telemetry.get(plugin_id) or {}
+    return {"calls": t.get("calls", 0), "errors": t.get("errors", 0),
+            "last_call": time.strftime("%Y-%m-%d %H:%M", time.localtime(t["last"])) if t.get("last") else None}
+
+
+def rate_check(kid: str, heavy: bool, cfg: dict) -> tuple[bool, int]:
+    """Token-Bucket pro API-Key und Klasse (heavy = LLM/Vision/Audio). Gibt (ok, retry_after_s)."""
+    limit = int(cfg.get("plugin_rate_limit_heavy_per_min" if heavy else "plugin_rate_limit_per_min",
+                        30 if heavy else 240))
+    if limit <= 0:
+        return True, 0
+    now = time.time()
+    key = (kid, heavy)
+    ts = [t for t in _rate_buckets.get(key, []) if now - t < 60]
+    if len(ts) >= limit:
+        _rate_buckets[key] = ts
+        return False, max(1, int(61 - (now - ts[0])))
+    ts.append(now)
+    _rate_buckets[key] = ts
+    return True, 0
 
 
 def has_scope(keyinfo: dict, scope: str) -> bool:
@@ -306,9 +381,11 @@ def kv_delete(plugin_id: str, namespace: str, collection: str, key: str) -> int:
 def kv_list(plugin_id: str, namespace: str, collection: str,
             prefix: str = "", limit: int = 100) -> list[dict]:
     init()
+    # LIKE-Wildcards im Prefix escapen (erweiterungen.md 3.5)
+    esc = (prefix or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     with store._conn() as c:
         rows = c.execute("""SELECT key, value, updated_at FROM plugin_kv
-            WHERE plugin_id=%s AND namespace=%s AND collection=%s AND key LIKE %s
+            WHERE plugin_id=%s AND namespace=%s AND collection=%s AND key LIKE %s ESCAPE '\\'
             ORDER BY key LIMIT %s;""",
-                         (plugin_id, namespace, collection, (prefix or "") + "%", limit)).fetchall()
+                         (plugin_id, namespace, collection, esc + "%", limit)).fetchall()
     return [{"key": r[0], "value": r[1], "updated_at": str(r[2])} for r in rows]

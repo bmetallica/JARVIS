@@ -49,6 +49,11 @@ def add_topics(sub_id: int, topics) -> None:
         _subs[sub_id]["topics"].update(topics or [])
 
 
+def remove_topics(sub_id: int, topics) -> None:
+    if sub_id in _subs:
+        _subs[sub_id]["topics"].difference_update(topics or [])
+
+
 def unsubscribe(sub_id: int) -> None:
     _subs.pop(sub_id, None)
 

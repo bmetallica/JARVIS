@@ -5,6 +5,8 @@ orchestrator/certs/
 orchestrator/config.json
 orchestrator/automations.json
 orchestrator/skills.json
+# Sicherungsgeneration der Laufzeitdateien (automations.json/skills.json)
+*.bak
 **/*.token
 **/secrets*.json
 .env

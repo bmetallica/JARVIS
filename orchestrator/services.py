@@ -131,6 +131,40 @@ def _post_llm(url: str, payload: dict, timeout: int, stream: bool = False):
     raise requests.exceptions.HTTPError("LLM-Server nicht erreichbar")
 
 
+
+def chat_json(messages: list[dict], cfg: dict, schema: dict, timeout: int | None = None) -> str:
+    """Chat-Antwort mit GRAMMATIK-erzwungenem JSON (llama.cpp response_format + Schema) —
+    garantiert valide Struktur in EINEM Durchgang (erweiterungen.md 11.4). Wirft bei
+    Server-Versionen ohne Schema-Support eine Exception (Aufrufer fällt auf Prompt+Repair zurück)."""
+    url = cfg["llm_url"].rstrip("/")
+    payload = {
+        "model":      cfg["llm_model"],
+        "messages":   messages,
+        "stream":     False,
+        "max_tokens": int(cfg.get("llm_max_tokens", 1024)),
+        "temperature": 0.1,
+        "chat_template_kwargs": _thinking_kwargs(cfg, False),
+        "cache_prompt": bool(cfg.get("llm_cache_prompt", True)),
+        "response_format": {"type": "json_object", "schema": schema or {}},
+    }
+    resp = requests.post(f"{url}/v1/chat/completions", json=payload,
+                         timeout=timeout or int(cfg.get("llm_timeout", 180)))
+    resp.raise_for_status()
+    msg = resp.json()["choices"][0].get("message", {}) or {}
+    return (msg.get("content") or "").strip()
+
+
+def _apply_tool_sampling(payload: dict, cfg: dict) -> None:
+    """Niedrige Temperatur für Runden MIT Tool-Angebot (erweiterungen.md 11.2):
+    Tool-Wahl/Argumente sind strukturierte Entscheidungen — Sampling-Streuung ist dort die
+    Hauptquelle der No-Think-Fehlgriffe kleiner Modelle. Textantwort-Runden (ohne Tools)
+    behalten die Server-Default-Temperatur. llm_tool_temperature < 0 deaktiviert das."""
+    tt = float(cfg.get("llm_tool_temperature", 0.2))
+    if tt >= 0:
+        payload["temperature"] = tt
+        payload["min_p"] = 0.05
+
+
 def llm_call(messages: list[dict], cfg: dict, tools: list | None = None, think: bool = False) -> dict:
     """Chat-Aufruf mit optionalem Tool-Calling. Gibt
     {content, tool_calls:[{id,name,args}], raw, finish} zurück.

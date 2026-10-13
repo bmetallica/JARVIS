@@ -16,6 +16,8 @@ ExecStart=/opt/JARVIS/orchestrator/run.sh
 # Sauber neu starten, falls der Prozess abstürzt oder der GPU-Server kurz weg ist
 Restart=always
 RestartSec=5
+# RAM-Obergrenze (Peak bisher <1 GB; Puffer für Embedding-Modell + Sessions) — erweiterungen.md 8.5
+MemoryMax=4G
 # Logs landen im journal: journalctl -u jarvis-orchestrator -f
 StandardOutput=journal
 StandardError=journal

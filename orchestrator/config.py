@@ -6,6 +6,7 @@ der Endpoints) und persistiert Änderungen wieder nach config.json.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -28,6 +29,8 @@ _DEFAULTS: dict = {
     "thinking_budget": 512,
     "debug_enabled": False,
     "log_retention_days": 14,       # persistente JSONL-Logs nach N Tagen löschen (#1; 0 = nie)
+    "history_retention_days": 90,   # chat_history: Zeilen älter als N Tage löschen (Housekeeping; 0 = nie)
+    "history_keep_per_session": 200,  # chat_history: pro Session höchstens N Zeilen behalten
     "log_redact": False,            # Nutzertext/Tool-Args/Ergebnis aus den JSONL-Logs entfernen (Privacy)
     "voice_id_threshold": 0.65,
     "stt_url": "http://192.168.66.225:8001",
@@ -80,6 +83,9 @@ _DEFAULTS: dict = {
     # "*" = jeden Origin erlauben (ok, da das Gateway Bearer-Keys nutzt, keine Cookies).
     # Origins registrierter Plugins (manifest.ui.entry) werden ZUSÄTZLICH automatisch erlaubt.
     "plugin_cors_origins": ["*"],
+    # Rate-Limits pro Plugin-API-Key und Minute (0 = aus). heavy = LLM/Vision/Audio (GPU-Schutz).
+    "plugin_rate_limit_per_min": 240,
+    "plugin_rate_limit_heavy_per_min": 30,
 
     # ── Kalender ─────────────────────────────────────────────────────────────────
     "calendar_enabled": True,
@@ -91,6 +97,11 @@ _DEFAULTS: dict = {
     "obsidian_inbox": "Inbox.md",    # Sammeldatei nur im Modus "inbox"
     "obsidian_autolink": True,       # neue Notizen automatisch per [[Wikilinks]] zu Themen/Notizen verbinden
     "obsidian_autolink_max": 4,      # höchstens so viele automatische Links pro Notiz
+    # Kategorie/Thema einer Notiz ("Notiz zum Thema X …"):
+    "obsidian_category_folder": True,  # Notiz in gleichnamigen Unterordner der Kategorie ablegen
+    "obsidian_category_tag": True,     # Kategorie zusätzlich als Tag im YAML-Frontmatter (+ erstellt:)
+    "obsidian_date_prefix": True,      # Dateinamen mit Datum präfixen ("2026-07-01 Titel.md") → chronologisch sortierbar
+    "obsidian_daily_categories": ["Tagebuch"],  # Kategorien im Daily-Notes-Modus: an <Kat>/YYYY-MM-DD.md anhängen
     # Zuordnung JARVIS-Nutzername (klein) → absoluter Vault-Pfad auf dem Host.
     "obsidian_vaults": {"daniel": "/opt/obsidian/config/Daniel"},
 }
@@ -104,6 +115,10 @@ def load() -> dict:
         pass
     except Exception as e:  # pragma: no cover
         print(f"[config] Warnung: config.json nicht lesbar ({e}) — nutze Defaults.")
+    # Secrets optional per Env überschreiben (hält sie aus config.json heraus; erweiterungen.md 3.2)
+    env_tok = os.environ.get("JARVIS_TELEGRAM_TOKEN")
+    if env_tok:
+        cfg["telegram_bot_token"] = env_tok
     return cfg
 
 

@@ -169,6 +169,34 @@ class SessionHub:
     def disconnect(self, session_id: str) -> None:
         self._ws.pop(session_id, None)
 
+    def prune(self, max_idle_s: float = 86400) -> int:
+        """RAM-Zustand toter Sessions räumen (erweiterungen.md 2.2): keine WS-Verbindung UND
+        keine Aktivität seit `max_idle_s`. Verlauf bleibt in der DB (Reload lädt nach).
+        Sessions ohne `_seen`-Eintrag altern über einen First-Noticed-Stempel."""
+        now = time.time()
+        state_dicts = [self._meta, self._pending, self._identity, self._history, self._last_uid,
+                       self._last_voice, self._onboard, self._seen, self._dev, self._last_tools,
+                       self._summary, self._cancel, self._authed]
+        all_sids = set().union(*(d.keys() for d in state_dicts)) | set(self._loaded_hist)
+        if not hasattr(self, "_prune_seen"):
+            self._prune_seen = {}
+        removed = 0
+        for sid in all_sids:
+            if sid in self._ws:                                   # verbunden → nie räumen
+                self._prune_seen.pop(sid, None)
+                continue
+            last = (self._seen.get(sid) or {}).get("last")
+            if last is None:                                      # nie geheartbeatet → über Prune-Stempel altern
+                last = self._prune_seen.setdefault(sid, now)
+            if now - last < max_idle_s:
+                continue
+            for d in state_dicts:
+                d.pop(sid, None)
+            self._loaded_hist.discard(sid)
+            self._prune_seen.pop(sid, None)
+            removed += 1
+        return removed
+
     def touch(self, session_id: str, **telemetry) -> None:
         """Lebenszeichen (Heartbeat) inkl. optionaler Telemetrie (room, volume, rssi, fw)."""
         if not session_id:

@@ -9,6 +9,11 @@
     {"message": "Mach einen Screenshot von meinem Rechner", "expect_any_of": ["client_screenshot", "client_action", "list_client_capabilities"]},
     {"message": "Baue mir ein Skill, das die Festplattenauslastung ausliest", "expect_any_of": ["create_skill"]},
     {"message": "Schalte das Licht im Wohnzimmer ein", "expect_any_of": ["search_mcp_tools", "load_mcp_tools"], "requires": "mcp", "note": "Smart-Home ist deferred → erst MCP-Tool laden"},
+    {"message": "Wie ist mein aktueller Stromverbrauch laut Stromzähler?", "expect_any_of": ["search_mcp_tools", "load_mcp_tools"], "requires": "mcp", "note": "Regression 2026-06-28: NICHT fetch_url mit erfundener URL"},
+    {"message": "Wie warm ist es im Bauwagen?", "expect_any_of": ["search_mcp_tools", "load_mcp_tools"], "requires": "mcp", "note": "Regression 2026-06-28: Sensor-Frage → MCP, nicht weather"},
+    {"message": "Notiz zum Thema ADHS, heute war ein guter Tag", "expect_any_of": ["save_note"], "note": "Kategorie-Notiz → save_note (mit category), nicht save_memory"},
+    {"message": "Was steht auf meiner To-do-Liste?", "expect_any_of": ["list_todos"]},
+    {"message": "Trag für morgen 15 Uhr Zahnarzt in meinen Kalender ein", "expect_any_of": ["add_event"]},
     {"message": "Wie spät ist es?", "expect_no_tool": true, "note": "Zeit steht im System-Prompt → kein Tool nötig"}
   ]
 }

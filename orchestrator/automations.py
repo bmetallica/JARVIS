@@ -124,9 +124,15 @@ class AutomationManager:
             print(f"[automations] Laden fehlgeschlagen: {e}")
 
     def _save(self) -> None:
+        # Atomar (tmp+rename) + eine .bak-Generation — schützt vor Datenverlust bei Crash (erweiterungen.md 2.4)
         try:
-            _PATH.write_text(json.dumps({"seq": self._seq, "items": list(self._items.values())},
-                                        indent=2, ensure_ascii=False), encoding="utf-8")
+            data = json.dumps({"seq": self._seq, "items": list(self._items.values())},
+                              indent=2, ensure_ascii=False)
+            tmp = _PATH.with_suffix(".json.tmp")
+            tmp.write_text(data, encoding="utf-8")
+            if _PATH.exists():
+                _PATH.replace(_PATH.with_suffix(".json.bak"))
+            tmp.replace(_PATH)
         except Exception as e:
             print(f"[automations] Speichern fehlgeschlagen: {e}")
 

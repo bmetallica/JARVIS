@@ -49,11 +49,14 @@ def _chown_to_vault(path: Path, vault: Path) -> None:
 
 def _list_note_titles(vault: Path, inbox: str, limit: int = 80) -> list[str]:
     """Vorhandene Notiz-Titel (Dateinamen ohne .md) — als Kandidaten für konsistente Verlinkung."""
-    titles = []
+    titles, seen = [], set()
     try:
-        for p in sorted(vault.glob("*.md")):
+        for p in sorted(vault.rglob("*.md")):              # rekursiv → auch Notizen in Kategorie-Ordnern
             if p.name == inbox or p.name.startswith("."):
                 continue
+            if p.stem in seen:
+                continue
+            seen.add(p.stem)
             titles.append(p.stem)
             if len(titles) >= limit:
                 break
@@ -101,9 +104,42 @@ def _fallback_title(text: str) -> str:
     return " ".join(words[:6])[:80] or "Notiz"
 
 
+def _sanitize_category(cat: str | None) -> str | None:
+    """Kategorie → Ordnername (lesbar, Leerzeichen erlaubt; kein Pfad-Ausbruch)."""
+    if not cat:
+        return None
+    c = re.sub(r"[\\/:*?\"<>|\n\r\t]", " ", cat).strip().strip(".")
+    c = re.sub(r"\s+", " ", c)
+    return c[:60] or None
+
+
+def _split_categories(category) -> list[str]:
+    """Kategorie(n) normalisieren: Liste ODER kommagetrennter String → bereinigte Liste
+    (erweiterungen.md 7.2 — mehrere Tags, Ordner = erste Kategorie)."""
+    if not category:
+        return []
+    raw = category if isinstance(category, (list, tuple)) else re.split(r"[,;/]| und ", str(category))
+    out = []
+    for c in raw:
+        s = _sanitize_category(str(c))
+        if s and s.lower() not in {x.lower() for x in out}:
+            out.append(s)
+    return out[:5]
+
+
+def _tag_safe(cat: str) -> str:
+    """Kategorie → gültiger Obsidian-Tag (keine Leerzeichen/Sonderzeichen; Umlaute bleiben)."""
+    t = re.sub(r"[^\w/-]", "-", cat, flags=re.UNICODE).strip("-/")
+    return re.sub(r"-{2,}", "-", t) or "Notiz"
+
+
 def save_note(username: str | None, text: str, title: str | None = None,
-              cfg: dict | None = None) -> tuple[bool, str]:
-    """Notiz in die Vault des Nutzers schreiben. Gibt (ok, Meldung) zurück."""
+              category: str | None = None, cfg: dict | None = None) -> tuple[bool, str]:
+    """Notiz in die Vault des Nutzers schreiben. Gibt (ok, Meldung) zurück.
+
+    Mit `category` (Thema/Kategorie): die Notiz landet je nach Config in einem gleichnamigen
+    Unterordner UND/ODER erhält die Kategorie als Tag im YAML-Frontmatter (Standard: beides).
+    """
     cfg = cfg or config.get()
     if not cfg.get("obsidian_enabled", True):
         return False, "Die Obsidian-Anbindung ist deaktiviert."
@@ -121,6 +157,13 @@ def save_note(username: str | None, text: str, title: str | None = None,
     inbox = (cfg.get("obsidian_inbox") or "Inbox.md")
     mode = (cfg.get("obsidian_note_mode") or "file").lower()
     autolink = cfg.get("obsidian_autolink", True)
+    cats = _split_categories(category)                 # mehrere Kategorien möglich (7.2)
+    cat = cats[0] if cats else None                    # Ordner = erste Kategorie
+    use_folder = cat and cfg.get("obsidian_category_folder", True)
+    use_tag = cat and cfg.get("obsidian_category_tag", True)
+    # Tagebuch-Modus (7.3): Kategorie in obsidian_daily_categories → an Tagesdatei anhängen
+    daily_cats = {str(x).lower() for x in (cfg.get("obsidian_daily_categories") or ["tagebuch"])}
+    is_daily = bool(cat) and cat.lower() in daily_cats
 
     # Ein LLM-Aufruf liefert (falls nötig) den Titel UND die Verlinkungen.
     gen_title, links = None, []
@@ -130,23 +173,40 @@ def save_note(username: str | None, text: str, title: str | None = None,
             links = []
     link_str = " ".join(f"[[{l}]]" for l in links)
 
-    if mode == "inbox" and not title:                       # alter Sammel-Modus (optional)
+    if mode == "inbox" and not title and not cat:           # alter Sammel-Modus (nur ohne Kategorie)
         rel = inbox
         target = (vault / rel).resolve()
         suffix = f" {link_str}" if link_str else ""
         body = f"- [{time.strftime('%Y-%m-%d %H:%M')}] {text}{suffix}\n"
         header = "# Inbox\n\n"
+    elif is_daily:                                          # Tagebuch: an die Tagesdatei anhängen (7.3)
+        base_dir = (vault / cat) if use_folder else vault
+        target = (base_dir / (time.strftime("%Y-%m-%d") + ".md")).resolve()
+        suffix = f" {link_str}" if link_str else ""
+        body = f"- **{time.strftime('%H:%M')}** {text}{suffix}\n"
+        header = ""
+        if use_tag:
+            tag_lines = "".join(f"  - {_tag_safe(c)}\n" for c in cats)
+            header = f"---\ntags:\n{tag_lines}erstellt: {time.strftime('%Y-%m-%d')}\n---\n" \
+                     f"# {time.strftime('%d.%m.%Y')}\n\n"
     else:                                                   # jede Notiz = eigene Datei (eigener Graph-Knoten)
         eff_title = title or gen_title or _fallback_title(text)
-        rel = _sanitize_title(eff_title) + ".md"
-        target = (vault / rel).resolve()
+        base_dir = (vault / cat) if use_folder else vault
+        date_pref = time.strftime("%Y-%m-%d ") if cfg.get("obsidian_date_prefix", True) else ""
+        fname = date_pref + _sanitize_title(eff_title) + ".md"
+        target = (base_dir / fname).resolve()
         if not title and target.exists():                  # auto-Titel: keine fremde Notiz überschreiben/anhängen
-            rel = _sanitize_title(eff_title) + " " + time.strftime("%H%M%S") + ".md"
-            target = (vault / rel).resolve()
+            fname = date_pref + _sanitize_title(eff_title) + " " + time.strftime("%H%M%S") + ".md"
+            target = (base_dir / fname).resolve()
         body = (text if text.endswith("\n") else text + "\n")
         if link_str:
             body += f"\nVerwandt: {link_str}\n"
-        header = ""
+        # YAML-Frontmatter (Tags + Erstellungsdatum) nur bei Kategorie(n) — 7.2: mehrere Tags
+        if use_tag:
+            tag_lines = "".join(f"  - {_tag_safe(c)}\n" for c in cats)
+            header = f"---\ntags:\n{tag_lines}erstellt: {time.strftime('%Y-%m-%d')}\n---\n"
+        else:
+            header = ""
 
     # Pfad-Containment: Ziel muss innerhalb der Vault liegen.
     if not str(target).startswith(str(vault) + os.sep):
@@ -161,9 +221,60 @@ def save_note(username: str | None, text: str, title: str | None = None,
             f.write(body)
         if new_file:
             _chown_to_vault(target, vault)
+            if use_folder:
+                _chown_to_vault(target.parent, vault)      # neuer Kategorie-Ordner dem Vault-Besitzer
     except Exception as e:
         return False, f"Konnte die Notiz nicht schreiben: {e}"
 
-    where = target.name
+    where = (f"{cat}/{target.name}" if use_folder and cat else target.name)
+    cat_msg = f" unter der Kategorie „{', '.join(cats)}“" if cats else ""
     linked = f" Verknüpft mit {', '.join(links)}." if links else ""
-    return True, f"Notiz in deiner Obsidian-Vault gespeichert ({where}).{linked}"
+    return True, f"Notiz{cat_msg} in deiner Obsidian-Vault gespeichert ({where}).{linked}"
+
+
+# ── Notizen wiederfinden (erweiterungen.md 7.1) ───────────────────────────────
+
+def search_notes(username: str | None, query: str, category: str | None = None,
+                 k: int = 5, cfg: dict | None = None) -> tuple[bool, str]:
+    """Volltextsuche über die Vault des Nutzers (rekursiv, optional auf eine Kategorie/Ordner
+    begrenzt). Einfaches Wort-Treffer-Scoring, Ergebnis mit Datei + Snippet."""
+    cfg = cfg or config.get()
+    vault_path = vault_for(username, cfg)
+    if not vault_path:
+        return False, f"Für „{username or 'unbekannt'}“ ist keine Obsidian-Vault hinterlegt."
+    vault = Path(vault_path).resolve()
+    if not vault.is_dir():
+        return False, f"Der hinterlegte Vault-Pfad existiert nicht: {vault_path}"
+    base = vault
+    cat = _sanitize_category(category)
+    if cat and (vault / cat).is_dir():
+        base = (vault / cat).resolve()
+        if not str(base).startswith(str(vault) + os.sep):
+            base = vault
+    words = [w for w in re.findall(r"[\wäöüß]+", (query or "").lower()) if len(w) >= 3]
+    if not words:
+        return False, "Bitte einen Suchbegriff angeben."
+    hits = []
+    try:
+        for p in base.rglob("*.md"):
+            if p.name.startswith("."):
+                continue
+            try:
+                textc = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            low = textc.lower()
+            score = sum(low.count(w) for w in words) + sum(2 for w in words if w in p.stem.lower())
+            if score <= 0:
+                continue
+            # Snippet um den ersten Treffer herum
+            pos = min((low.find(w) for w in words if w in low), default=0)
+            snippet = re.sub(r"\s+", " ", textc[max(0, pos - 60):pos + 160]).strip()
+            hits.append((score, p.relative_to(vault), snippet))
+    except Exception as e:
+        return False, f"Suche fehlgeschlagen: {e}"
+    if not hits:
+        return True, f"Keine Notizen zu „{query}“ gefunden" + (f" (Kategorie {cat})" if cat else "") + "."
+    hits.sort(key=lambda h: -h[0])
+    lines = [f"- {rel}: …{snip}…" for _, rel, snip in hits[:k]]
+    return True, f"Gefundene Notizen zu „{query}“:\n" + "\n".join(lines)

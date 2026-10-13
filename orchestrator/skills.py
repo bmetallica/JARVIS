@@ -51,9 +51,14 @@ def _load() -> None:
 
 
 def _save() -> None:
+    # Atomar (tmp+rename) + eine .bak-Generation (erweiterungen.md 2.4)
     try:
-        _PATH.write_text(json.dumps({"seq": _seq, "items": list(_items.values())},
-                                    indent=2, ensure_ascii=False), encoding="utf-8")
+        data = json.dumps({"seq": _seq, "items": list(_items.values())}, indent=2, ensure_ascii=False)
+        tmp = _PATH.with_suffix(".json.tmp")
+        tmp.write_text(data, encoding="utf-8")
+        if _PATH.exists():
+            _PATH.replace(_PATH.with_suffix(".json.bak"))
+        tmp.replace(_PATH)
     except Exception as e:
         print(f"[skills] Speichern fehlgeschlagen: {e}")
 

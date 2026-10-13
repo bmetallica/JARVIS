@@ -293,8 +293,10 @@ async function loadPlugins() {
         const div = document.createElement("div"); div.className = "item";
         const badge = p.enabled ? `<span class="tag" style="background:var(--ok);color:#04141b">aktiv</span>`
                                 : `<span class="tag" style="background:var(--bad);color:#fff">aus</span>`;
+        const tel = p.telemetry || {};
+        const telStr = tel.calls ? ` · ${tel.calls} Calls${tel.errors ? ` (${tel.errors} Fehler)` : ""}${tel.last_call ? " · zuletzt " + tel.last_call : ""}` : "";
         div.innerHTML = `<div class="head"><span class="name">${p.name} <code>${p.id}</code>
-              <span class="muted" style="font-size:11px">v${p.version} · ${p.type} · ${p.active_keys} Key(s)</span> ${badge}</span>
+              <span class="muted" style="font-size:11px">v${p.version} · ${p.type} · ${p.active_keys} Key(s)${telStr}</span> ${badge}</span>
             <span>
               <button class="small secondary" data-keys="${p.id}">🔑 Keys</button>
               <button class="small" data-tog="${p.id}">${p.enabled ? "Deaktivieren" : "Aktivieren"}</button>
@@ -399,11 +401,22 @@ function fmtEvent(e) {
 async function loadDebug() {
     const d = await api("GET", "/api/admin/debug");
     $("cfg-debug-toggle").checked = d.enabled;
-    $("debug-log").textContent = d.events.length
-        ? d.events.map(fmtEvent).join("\n")
-        : (d.enabled ? "(noch keine Ereignisse — interagiere mit Jarvis)" : "(Aufzeichnung deaktiviert)");
+    // Filter (erweiterungen.md 9.3): Typ-Dropdown dynamisch befüllen + Freitext-Filter anwenden
+    const kindSel = $("debug-kind");
+    const kinds = [...new Set(d.events.map((e) => e.kind))].sort();
+    const cur = kindSel.value;
+    kindSel.innerHTML = '<option value="">alle Typen</option>' + kinds.map((k) => `<option${k === cur ? " selected" : ""}>${k}</option>`).join("");
+    const q = ($("debug-filter").value || "").toLowerCase();
+    let evs = d.events;
+    if (kindSel.value) evs = evs.filter((e) => e.kind === kindSel.value);
+    if (q) evs = evs.filter((e) => JSON.stringify(e).toLowerCase().includes(q));
+    $("debug-log").textContent = evs.length
+        ? evs.map(fmtEvent).join("\n")
+        : (d.enabled ? "(keine passenden Ereignisse)" : "(Aufzeichnung deaktiviert)");
     $("debug-log").scrollTop = $("debug-log").scrollHeight;
 }
+$("debug-kind").onchange = loadDebug;
+$("debug-filter").oninput = () => { clearTimeout(window._dbf); window._dbf = setTimeout(loadDebug, 300); };
 $("cfg-debug-toggle").onchange = async (e) => { await api("POST", "/api/admin/debug", { enabled: e.target.checked }); loadDebug(); };
 $("btn-debug-refresh").onclick = loadDebug;
 $("btn-debug-clear").onclick = async () => { await api("POST", "/api/admin/debug/clear"); loadDebug(); };
@@ -711,7 +724,21 @@ async function loadConfig() {
     const cfg = await api("GET", "/api/config");
     for (const k of CFG_KEYS) { const el = $("cfg-" + k); if (el) el.value = cfg[k] ?? ""; }
     for (const k of CFG_BOOLS) { const el = $("cfg-" + k); if (el) el.checked = !!cfg[k]; }
+    const cors = $("cfg-plugin-cors");
+    if (cors) cors.value = (cfg.plugin_cors_origins || ["*"]).join(", ");
+    firstRunHint(cfg);
     await loadMessaging();
+}
+
+// Erst-Einrichtungs-Checkliste (erweiterungen.md 9.4) — nur zeigen, solange offensichtliche Defaults aktiv sind.
+function firstRunHint(cfg) {
+    const el = $("first-run"); if (!el) return;
+    const todos = [];
+    if (!Object.keys(cfg.obsidian_vaults || {}).length) todos.push("Obsidian-Vault(s) zuordnen (Integrationen)");
+    if (!cfg.telegram_enabled) todos.push("Telegram-Bot verbinden (System → Messaging) — optional");
+    if ((USERS || []).length <= 1) todos.push("Nutzer anlegen (Tab Nutzer) und Stimme anlernen");
+    el.classList.toggle("hidden", !todos.length);
+    if (todos.length) el.innerHTML = "<b>🚀 Erste Schritte:</b> " + todos.map((t) => `<span class="tag">${t}</span>`).join(" ");
 }
 
 async function loadMessaging() {
@@ -784,6 +811,8 @@ $("btn-save-cfg").onclick = async () => {
     const patch = {};
     for (const k of CFG_KEYS) { const el = $("cfg-" + k); if (el) patch[k] = el.value; }
     for (const k of CFG_BOOLS) { const el = $("cfg-" + k); if (el) patch[k] = el.checked; }
+    const cors = $("cfg-plugin-cors");
+    if (cors) patch.plugin_cors_origins = cors.value.split(",").map((s) => s.trim()).filter(Boolean);
     $("cfg-status").textContent = "Speichere…";
     try { await api("POST", "/api/config", patch); $("cfg-status").textContent = "✓ gespeichert"; }
     catch (e) { $("cfg-status").textContent = "Fehler: " + e.message; }
@@ -826,8 +855,10 @@ $("btn-add-group").onclick = async () => {
     $("new-group").value = ""; $("new-group-admin").checked = false; await loadAdmin();
 };
 
+let USERS = [];
 async function loadUsers() {
     const users = (await api("GET", "/api/admin/users")).users;
+    USERS = users;
     let vaults = {};
     try { vaults = (await api("GET", "/api/config")).obsidian_vaults || {}; } catch { /* ignore */ }
     const el = $("users"); el.innerHTML = "";
