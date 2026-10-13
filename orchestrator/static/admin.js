@@ -73,6 +73,7 @@ async function loadAdmin() {
     await loadUsers();
     await loadConfig();
     await loadMcp();
+    await loadForwarding();
     await loadPlugins();
     await loadDebug();
     await loadDevices();
@@ -302,6 +303,67 @@ $("btn-add-mcp").onclick = async () => {
     catch (e) { alert(e.message); }
 };
 $("btn-refresh-mcp").onclick = async () => { await api("POST", "/api/admin/mcp/refresh"); await loadAdmin(); };
+
+// ── Weiterleitungen (Präfix → externer Dienst) ────────────────────────────────
+let FWD = { rules: [], kinds: ["text", "url", "image", "pdf"], timeout_s: 10 };
+
+function fwdRow(r, i) {
+    const types = (r.types || FWD.kinds);
+    const boxes = FWD.kinds.map((k) => `<label style="font-size:11px;margin-right:8px">
+        <input type="checkbox" data-fwd-type="${i}" value="${k}" ${types.includes(k) ? "checked" : ""}> ${k}</label>`).join("");
+    const tokPh = r.has_token ? `gesetzt: ${r.token_hint} — neuer Wert überschreibt, "-" löscht`
+                              : "Zugangsschlüssel (Bearer) — optional";
+    return `<div class="item">
+      <div class="row">
+        <input data-fwd="prefix" data-i="${i}" value="${(r.prefix || "").replace(/"/g, "&quot;")}" placeholder="Präfix, z. B. rezept" style="max-width:170px">
+        <input data-fwd="url" data-i="${i}" value="${(r.url || "").replace(/"/g, "&quot;")}" placeholder="http://host:8545/api/import" style="flex:1">
+        <label style="font-size:12px"><input type="checkbox" data-fwd="enabled" data-i="${i}" ${r.enabled !== false ? "checked" : ""}> aktiv</label>
+        <button class="small danger" data-fwd-del="${i}">Entfernen</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input data-fwd="token" data-i="${i}" placeholder="${tokPh}" style="flex:1">
+        <span class="muted" style="font-size:11px">${boxes}</span>
+      </div>
+    </div>`;
+}
+
+function renderForwarding() {
+    const el = $("fwd-rules");
+    el.innerHTML = FWD.rules.length ? FWD.rules.map(fwdRow).join("")
+        : '<p class="muted">Keine Regeln — alles geht wie gewohnt an den Agenten.</p>';
+    $("fwd-note").textContent = `Zeitlimit pro Weiterleitung: ${FWD.timeout_s} s`;
+    el.querySelectorAll("[data-fwd-del]").forEach((b) => b.onclick = () => {
+        FWD.rules.splice(+b.dataset.fwdDel, 1); renderForwarding();
+    });
+}
+
+async function loadForwarding() {
+    FWD = await api("GET", "/api/admin/forwarding");
+    FWD.rules = FWD.rules || [];
+    renderForwarding();
+}
+
+$("btn-add-fwd").onclick = () => {
+    FWD.rules.push({ prefix: "", url: "", types: [...FWD.kinds], enabled: true });
+    renderForwarding();
+};
+
+$("btn-save-fwd").onclick = async () => {
+    const el = $("fwd-rules");
+    const rules = FWD.rules.map((r, i) => {
+        const get = (f) => el.querySelector(`[data-fwd="${f}"][data-i="${i}"]`);
+        const types = [...el.querySelectorAll(`[data-fwd-type="${i}"]:checked`)].map((c) => c.value);
+        return {
+            prefix: (get("prefix").value || "").trim(),
+            url: (get("url").value || "").trim(),
+            token: (get("token").value || "").trim(),
+            types: types.length ? types : [...FWD.kinds],
+            enabled: get("enabled").checked,
+        };
+    }).filter((r) => r.prefix);
+    try { const r = await api("POST", "/api/admin/forwarding", { rules }); FWD.rules = r.rules; renderForwarding(); }
+    catch (e) { alert(e.message); }
+};
 
 // ── Plugins (Gateway /api/v1/*) ────────────────────────────────────────────────
 let PLUGIN_META = { api_scopes: [], tool_resources: [], mcp_resources: [] };

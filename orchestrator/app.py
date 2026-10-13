@@ -42,6 +42,7 @@ import automations
 import watchers
 import skills
 import sandbox
+import forwarding
 import messaging
 import context_budget
 import profile as user_profile
@@ -107,6 +108,8 @@ def _mask_secrets(cfg: dict) -> dict:
         tok = out.get(k) or ""
         if tok:
             out[k] = "…" + tok[-4:]
+    if out.get("forward_rules"):                 # Zugangsschlüssel der Weiterleitungen maskieren
+        out["forward_rules"] = forwarding.masked(cfg)
     return out
 
 
@@ -2173,6 +2176,26 @@ _TG_MAX_IMAGE_BYTES = 12_000_000        # Obergrenze für eingehende Telegram-Bi
 _TG_MAX_DOC_BYTES = 20_000_000          # Grenze der Telegram-Bot-API für Downloads
 
 
+async def _try_forward(chat_id, text: str, kind: str, *, file: tuple | None = None,
+                       sender: str = "") -> bool:
+    """Weiterleitungsregel prüfen und ggf. ausführen (phase1.md Baustein 3).
+    True = weitergeleitet; der Agent läuft dann NICHT mehr, damit nichts doppelt
+    verarbeitet wird — auch im Fehlerfall nicht.
+    Der Aufrufer hat den Chat vorher auf „freigegeben" geprüft."""
+    cfg = config.get()
+    rule, rest = forwarding.match(cfg, text, kind)
+    if not rule:
+        return False
+    user = await asyncio.to_thread(messaging.user_for_chat, chat_id)
+    who = (user or {}).get("username") or sender or str(chat_id)
+    ok, msg = await asyncio.to_thread(forwarding.forward, rule, kind, rest, file=file,
+                                      requested_by=who, chat_id=chat_id)
+    sid = f"tg{chat_id}"
+    # In den Verlauf, damit JARVIS bei Rückfragen weiß, was passiert ist.
+    hub.append_history(sid, "user", f"[weitergeleitet an {rule['prefix']}] {rest}".strip())
+    hub.append_history(sid, "assistant", msg)
+    await asyncio.to_thread(messaging.send_to_chat, chat_id, msg)
+    return True
 
 
 def _tts_ogg(text: str, cfg: dict) -> bytes | None:
@@ -2208,6 +2231,8 @@ async def _handle_telegram_message(chat_id, text: str, sender: str = "", prefer_
         messaging.add_pending(chat_id, sender, text)
         debug.log("telegram_blocked", chat=chat_id, sender=sender, message=text[:120])
         print(f"[telegram] Nachricht von nicht verifiziertem Chat {chat_id} ignoriert (→ ausstehende Kontakte).")
+        return
+    if await _try_forward(chat_id, text, "text", sender=sender):   # Baustein 3
         return
     sid = f"tg{chat_id}"
     user = await asyncio.to_thread(messaging.user_for_chat, chat_id)
@@ -2276,6 +2301,9 @@ async def _handle_telegram_photo(chat_id, m: dict, sender: str = "") -> None:
         await asyncio.to_thread(messaging.send_to_chat, chat_id,
                                 "Das Bild ist zu groß (max. 12 MB) — bitte kleiner schicken.")
         return
+    # Weiterleitungsregel vor dem Agentenlauf (Baustein 3) — Caption ist der Auslöser.
+    if await _try_forward(chat_id, caption, "image", file=(fname, data, mime), sender=sender):
+        return
     data_uri = f"data:{mime};base64," + base64.b64encode(data).decode()
     sid = f"tg{chat_id}"
     user = await asyncio.to_thread(messaging.user_for_chat, chat_id)
@@ -2319,6 +2347,9 @@ async def _handle_telegram_document(chat_id, m: dict, sender: str = "") -> None:
                                 "Das PDF ist zu groß (max. 20 MB) — bitte kleiner schicken.")
         return
     mime = doc.get("mime_type") or "application/pdf"
+    # Weiterleitungsregel vor dem Agentenlauf (Baustein 3) — Caption ist der Auslöser.
+    if await _try_forward(chat_id, caption, "pdf", file=(fname, data, mime), sender=sender):
+        return
     sid = f"tg{chat_id}"
     user = await asyncio.to_thread(messaging.user_for_chat, chat_id)
     if user:
@@ -2653,6 +2684,49 @@ def admin_group_perms(body: dict, jarvis_admin_token: str | None = Cookie(defaul
     _admin(jarvis_admin_token)
     auth.set_group_permissions(int(body["id"]), body.get("resources", []))
     return {"ok": True}
+
+
+@app.get("/api/admin/forwarding")
+def admin_forwarding_get(jarvis_admin_token: str | None = Cookie(default=None)):
+    """Weiterleitungsregeln (phase1.md Baustein 3) — Token nur maskiert."""
+    _admin(jarvis_admin_token)
+    return {"rules": forwarding.masked(config.get()), "kinds": list(forwarding.KINDS),
+            "timeout_s": forwarding.TIMEOUT_S}
+
+
+@app.post("/api/admin/forwarding")
+def admin_forwarding_set(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Regel-Liste ersetzen. Ein leerer Token-Wert LÄSST den bisherigen stehen (das UI bekommt
+    ihn nie im Klartext zu sehen und könnte ihn sonst nur zerstören); "-" löscht ihn."""
+    _admin(jarvis_admin_token)
+    old = {str(r.get("prefix") or "").lower(): str(r.get("token") or "")
+           for r in (config.get().get("forward_rules") or []) if isinstance(r, dict)}
+    rules = []
+    for r in (body or {}).get("rules") or []:
+        if not isinstance(r, dict):
+            continue
+        prefix = str(r.get("prefix") or "").strip()
+        url = str(r.get("url") or "").strip()
+        if not prefix:
+            continue
+        if not url.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=400,
+                                detail=f"Adresse von „{prefix}“ muss mit http:// oder https:// beginnen.")
+        tok = str(r.get("token") or "").strip()
+        if not tok:                               # leer gelassen → bisherigen Token behalten
+            tok = old.get(prefix.lower(), "")
+        elif tok == "-":                          # ausdrücklich löschen
+            tok = ""
+        elif tok.startswith(("…", "...")):        # maskierten Hinweis nicht zurückschreiben
+            tok = old.get(prefix.lower(), "")
+        types = [str(x).strip().lower() for x in (r.get("types") or forwarding.KINDS)]
+        rules.append({"prefix": prefix, "url": url, "token": tok,
+                      "types": [x for x in types if x in forwarding.KINDS] or list(forwarding.KINDS),
+                      "enabled": bool(r.get("enabled", True))})
+    config.update({"forward_rules": rules})
+    debug.log("forward_rules_set", count=len(rules),
+              prefixes=[r["prefix"] for r in rules])
+    return {"ok": True, "rules": forwarding.masked(config.get())}
 
 
 @app.get("/api/admin/mcp")

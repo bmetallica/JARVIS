@@ -43,6 +43,10 @@ _DEFAULTS: dict = {
     # Scan-Seiten beim ERSTEN Lesen eines PDFs im Gespräch (Antwortzeit!). read_document
     # darf später das volle Budget pdf_ocr_max_pages nutzen.
     "pdf_inline_ocr_pages": 2,
+    # Weiterleitungsregeln (phase1.md Baustein 3), verwaltet im Admin-UI:
+    # [{"prefix": "rezept", "url": "http://host:8545/api/import", "token": "…",
+    #   "types": ["text", "url", "image", "pdf"], "enabled": true}]
+    "forward_rules": [],
     "profile_update_every": 6,      # Nutzerprofil höchstens alle N Turns neu generieren
     "chars_per_token": 3.0,         # grobe Token-Schätzung (deutsch ~3 Zeichen/Token)
     "summary_max_chars": 1500,      # Obergrenze der rollierenden Gesprächs-Zusammenfassung

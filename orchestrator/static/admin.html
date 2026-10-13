@@ -53,6 +53,7 @@
                 <button class="navbtn" data-tab="groups">🛡 Gruppen &amp; Rechte</button>
                 <button class="navbtn" data-tab="mcp">🔌 MCP-Server</button>
                 <button class="navbtn" data-tab="plugins">🧩 Plugins</button>
+                <button class="navbtn" data-tab="forwarding">📨 Weiterleitungen</button>
                 <button class="navbtn" data-tab="devices">📡 Geräte</button>
                 <button class="navbtn" data-tab="autonomy">🤖 Autonomie</button>
                 <button class="navbtn" data-tab="skills">🧰 Skills</button>
@@ -221,6 +222,21 @@
                     <input id="new-mcp-url" placeholder="http://host:8000/mcp">
                     <button id="btn-add-mcp">Hinzufügen</button>
                     <button id="btn-refresh-mcp" class="small secondary">↻ Aktualisieren</button>
+                </div>
+            </div>
+
+            <div class="card tab hidden" data-tab="forwarding">
+                <h2>Weiterleitungen</h2>
+                <p class="muted" style="font-size:12px">Beginnt eine Telegram-Nachricht (oder die Bildunterschrift
+                   eines Fotos/PDFs) mit einem <b>Präfix</b>, geht sie samt Datei direkt an die angegebene Adresse —
+                   <b>ohne</b> Agentenlauf. Die Antwort des Ziels (Feld <code>message</code>) geht als Telegram-Antwort
+                   zurück. Bei einem Fehler verarbeitet JARVIS die Nachricht <b>nicht</b> zusätzlich selbst, damit
+                   nichts doppelt ankommt. Geprüft wird immer erst, ob der Chat freigegeben ist.</p>
+                <div id="fwd-rules"></div>
+                <div class="row" style="margin-top:8px">
+                    <button id="btn-add-fwd" class="small">+ Regel</button>
+                    <button id="btn-save-fwd">Speichern</button>
+                    <span class="muted" id="fwd-note" style="font-size:11px"></span>
                 </div>
             </div>
 

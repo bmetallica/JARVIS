@@ -145,7 +145,7 @@ Vollständige Spezifikation + Template: [`pluginsystem.md`](./pluginsystem.md) �
 Der Projekt-Review mit allen Verbesserungen (umgesetzt + Backlog) liegt in
 [`erweiterungen.md`](./erweiterungen.md); bekannte Probleme + Lösungen in [`problems.md`](./problems.md).
 Tests: `orchestrator/tests/` (`run_unit.py`, `test_plugins.py`, `test_features.py`,
-Eval-Harness `eval_tool_selection.py`).
+`test_phase1.py`, Eval-Harness `eval_tool_selection.py`).
 
 ## 🔐 Sicherheit & Hinweise
 
