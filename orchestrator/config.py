@@ -51,6 +51,10 @@ _DEFAULTS: dict = {
     "autonomous_tool_blacklist": [],            # z.B. ["create_user", "set_device_volume"]
     "autonomous_mcp_blacklist": [],             # z.B. ["smarthome"]  → kompletten Server sperren
     "autonomous_event_cooldown_s": 30,          # Ereignis-Trigger nicht öfter als alle N Sekunden
+    # Ereignis-Auslösung von außen (POST /api/admin/events/fire) ohne Admin-Login:
+    # nur aktiv, wenn beides gesetzt ist (Toggle + Geheimnis). Verwaltung im Admin-UI → Autonomie.
+    "events_token_enabled": False,
+    "events_token": "",                         # Geheimnis (Header X-JARVIS-Event-Token / Bearer / ?token=)
 
     # ── Code-Sandbox (Tier 3, eigener Container — niemals auf dem Host) ───────────
     "sandbox_url": "http://127.0.0.1:8090",

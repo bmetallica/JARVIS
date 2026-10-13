@@ -156,6 +156,21 @@
                     <div class="row"><button id="btn-save-autonomy">Autonomie-Einstellungen speichern</button>
                         <span id="autonomy-status" class="muted"></span></div>
                 </fieldset>
+
+                <fieldset style="margin-top:14px"><legend>Ereignis-Token (externe Auslösung)</legend>
+                    <p class="muted" style="font-size:12px">Erlaubt fremden Systemen (Smart-Home, Webhook, Skript),
+                       Ereignisse per <code>POST /api/admin/events/fire</code> auszulösen — <b>ohne</b> Admin-Login.
+                       Der Token gilt nur für diesen einen Endpunkt, nicht für den restlichen Admin-Bereich.
+                       Mitschicken als Header <code>X-JARVIS-Event-Token</code>, <code>Authorization: Bearer …</code>
+                       oder Query <code>?token=…</code> (Query landet in Proxy-Logs — Header bevorzugen).</p>
+                    <label class="inline"><input type="checkbox" id="ev-token-enabled"> Token-Zugang aktiv</label>
+                    <label>Token <input id="ev-token" placeholder="leer lassen = unverändert; zum Löschen leeren + speichern"></label>
+                    <div class="row">
+                        <button id="btn-ev-token-gen" class="small">🔑 Neuen Token erzeugen</button>
+                        <span id="ev-token-status" class="muted"></span>
+                    </div>
+                    <p id="ev-token-new" class="muted hidden" style="font-size:12px;word-break:break-all"></p>
+                </fieldset>
             </div>
 
             <div class="card tab hidden" data-tab="skills">

@@ -612,12 +612,34 @@ async function loadAutonomy() {
     };
     mk("bl-tools", a.tools, a.tool_blacklist);
     mk("bl-mcps", a.mcps, a.mcp_blacklist);
+    // Ereignis-Token: nur Zustand + Hinweis (…1a2b), niemals das Geheimnis selbst
+    $("ev-token-enabled").checked = !!a.events_token_enabled;
+    $("ev-token").value = "";
+    $("ev-token").placeholder = a.has_events_token
+        ? `gesetzt (${a.events_token_hint}) — leer lassen = unverändert`
+        : "noch kein Token — erzeugen oder eigenen eintragen";
 }
 $("btn-save-autonomy").onclick = async () => {
     const tools = [...document.querySelectorAll("#bl-tools input:checked")].map((c) => c.value);
     const mcps = [...document.querySelectorAll("#bl-mcps input:checked")].map((c) => c.value);
-    await api("POST", "/api/admin/autonomy", { tool_blacklist: tools, mcp_blacklist: mcps, event_cooldown_s: +$("auto-cooldown").value });
+    const body = { tool_blacklist: tools, mcp_blacklist: mcps, event_cooldown_s: +$("auto-cooldown").value,
+                   events_token_enabled: $("ev-token-enabled").checked };
+    const tok = $("ev-token").value.trim();
+    if (tok) body.events_token = tok;                 // leer = unverändert (Löschen: Button unten)
+    await api("POST", "/api/admin/autonomy", body);
     $("autonomy-status").textContent = "✓ gespeichert"; setTimeout(() => $("autonomy-status").textContent = "", 2000);
+    await loadAutonomy();
+};
+
+// Ereignis-Token erzeugen — wird EINMALIG im Klartext angezeigt (danach nur noch maskiert).
+$("btn-ev-token-gen").onclick = async () => {
+    if (!confirm("Neuen Ereignis-Token erzeugen? Ein bereits vergebener Token wird dadurch sofort ungültig.")) return;
+    const r = await api("POST", "/api/admin/events/token");
+    const el = $("ev-token-new");
+    el.textContent = "Neuer Token (jetzt kopieren, wird nicht erneut angezeigt): " + r.token;
+    el.classList.remove("hidden");
+    $("ev-token-status").textContent = "✓ erzeugt und aktiviert";
+    await loadAutonomy();
 };
 
 // ── Selbst-gebaute Skills ───────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import re
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -81,17 +82,37 @@ def health():
     return {"orchestrator": "ok", "services": services.health(config.get())}
 
 
+# Config-Schlüssel, die NIE im Klartext ans UI gehen (erweiterungen.md 3.2).
+_SECRET_CFG_KEYS = ("telegram_bot_token", "events_token")
+
+
+def _mask_secrets(cfg: dict) -> dict:
+    """Geheimnisse nur maskiert ans UI ausgeben (erweiterungen.md 3.2)."""
+    out = dict(cfg)
+    for k in _SECRET_CFG_KEYS:
+        tok = out.get(k) or ""
+        if tok:
+            out[k] = "…" + tok[-4:]
+    return out
+
+
 @app.get("/api/config")
 def get_config(jarvis_admin_token: str | None = Cookie(default=None)):
-    """Zentrale Einstellungen — nur Admin (verwaltet im Admin-UI)."""
+    """Zentrale Einstellungen — nur Admin (verwaltet im Admin-UI). Secrets maskiert."""
     _admin(jarvis_admin_token)
-    return config.get()
+    return _mask_secrets(config.get())
 
 
 @app.post("/api/config")
 def set_config(patch: dict, jarvis_admin_token: str | None = Cookie(default=None)):
     _admin(jarvis_admin_token)
-    return config.update(patch)
+    # Maskierte Secrets aus dem UI nicht zurückschreiben (würden den echten Token zerstören).
+    p = dict(patch or {})
+    for k in _SECRET_CFG_KEYS:
+        tok = p.get(k)
+        if isinstance(tok, str) and (tok.startswith("…") or tok.startswith("...")):
+            p.pop(k, None)
+    return _mask_secrets(config.update(p))
 
 
 @app.get("/api/models")
@@ -2423,6 +2444,10 @@ def admin_autonomy_get(jarvis_admin_token: str | None = Cookie(default=None)):
         "tools": [t["function"]["name"] for t in tools.TOOL_SCHEMAS],
         "mcps": [r.split(":", 1)[1] for r in mcp_hub.server_resources()],
         "events": automations.known_events(),
+        # Ereignis-Token (externe Auslösung von /api/admin/events/fire) — nur Hinweis, nie im Klartext.
+        "events_token_enabled": bool(cfg.get("events_token_enabled", False)),
+        "has_events_token": bool(cfg.get("events_token")),
+        "events_token_hint": ("…" + str(cfg["events_token"])[-4:]) if cfg.get("events_token") else "",
     }
 
 
@@ -2439,21 +2464,72 @@ def admin_autonomy_set(body: dict, jarvis_admin_token: str | None = Cookie(defau
         patch["autonomous_mcp_blacklist"] = list(b["mcp_blacklist"])
     if "event_cooldown_s" in b:
         patch["autonomous_event_cooldown_s"] = int(b["event_cooldown_s"])
+    if "events_token_enabled" in b:
+        patch["events_token_enabled"] = bool(b["events_token_enabled"])
+    if "events_token" in b:                       # "" = Token löschen; maskierter Hinweis wird ignoriert
+        tok = str(b["events_token"]).strip()
+        if not (tok.startswith("…") or tok.startswith("...")):
+            patch["events_token"] = tok
     cfg = config.update(patch)
     automations.manager.enabled = bool(cfg.get("autonomous_enabled", True))
     automations.manager.cooldown_s = int(cfg.get("autonomous_event_cooldown_s", 30))
     return {"ok": True, "enabled": automations.manager.enabled}
 
 
+def _event_token_presented(request: Request) -> str:
+    """Mitgeschickter Ereignis-Token: Header X-JARVIS-Event-Token, Bearer-Header oder ?token=."""
+    got = (request.headers.get("x-jarvis-event-token") or "").strip()
+    if not got:
+        auth_h = request.headers.get("authorization") or ""
+        if auth_h.lower().startswith("bearer "):
+            got = auth_h[7:].strip()
+    if not got:
+        got = (request.query_params.get("token") or "").strip()
+    return got
+
+
+def _event_token_check(request: Request) -> str:
+    """'ok' = gültiger Ereignis-Token · 'bad' = Token mitgeschickt, aber falsch/deaktiviert ·
+    '' = keiner mitgeschickt (→ normale Admin-Session nötig)."""
+    got = _event_token_presented(request)
+    if not got:
+        return ""
+    cfg = config.get()
+    want = str(cfg.get("events_token") or "")
+    if not (cfg.get("events_token_enabled") and want):
+        return "bad"                               # Zugang aus → auch ein „richtiger" Token zählt nicht
+    return "ok" if secrets.compare_digest(got, want) else "bad"
+
+
 @app.post("/api/admin/events/fire")
-async def admin_event_fire(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
-    """Ereignis manuell auslösen (Test / Integration externer Quellen wie Smarthome/MCP-Push)."""
-    _admin(jarvis_admin_token)
+async def admin_event_fire(body: dict, request: Request,
+                           jarvis_admin_token: str | None = Cookie(default=None)):
+    """Ereignis manuell auslösen (Test / Integration externer Quellen wie Smarthome/MCP-Push).
+    Zugang: Admin-Session ODER Ereignis-Token (Admin-UI → Autonomie → Ereignis-Token)."""
+    state = _event_token_check(request)
+    ip = request.client.host if request.client else ""
+    if state == "bad":
+        debug.log("event_fire_denied", ip=ip, reason="ungültiger oder deaktivierter Ereignis-Token")
+        raise HTTPException(status_code=403, detail="Ereignis-Token ungültig oder deaktiviert.")
+    if state != "ok":
+        _admin(jarvis_admin_token)                 # kein Token mitgeschickt → wie bisher Admin-Pflicht
     name = (body or {}).get("event", "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="event erforderlich.")
     fired = await automations.manager.dispatch_event(name, (body or {}).get("payload") or {})
+    debug.log("event_fire", source=("token" if state == "ok" else "admin"), ip=ip,
+              event=name, fired=fired)
     return {"fired": fired}
+
+
+@app.post("/api/admin/events/token")
+def admin_event_token_new(jarvis_admin_token: str | None = Cookie(default=None)):
+    """Neuen Ereignis-Token erzeugen (ersetzt den alten sofort) und EINMALIG im Klartext zurückgeben."""
+    _admin(jarvis_admin_token)
+    token = secrets.token_urlsafe(32)
+    config.update({"events_token": token, "events_token_enabled": True})
+    debug.log("event_token_rotated", enabled=True)
+    return {"token": token, "enabled": True}
 
 
 @app.get("/api/admin/messaging")
