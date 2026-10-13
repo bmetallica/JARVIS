@@ -86,6 +86,18 @@ def keywords_for(name: str) -> list[str]:
     return list(DEFAULT_ACCEL_KEYWORDS)
 
 
+def matched_keywords(server: str, message: str) -> list[str]:
+    """Stichwörter dieses Servers, die im Nutzertext vorkommen — längste zuerst.
+    Die Listen werden aus den ECHTEN Gerätenamen geharvestet, taugen also als Suchwörter
+    (anders als das gebeugte Nutzerwort: „Stromzählern" findet in Domoticz nichts)."""
+    msg = (message or "").lower()
+    if not msg:
+        return []
+    hits = [k for k in keywords_for(server) if k and len(k) >= 4 and k in msg]
+    hits.sort(key=len, reverse=True)
+    return hits
+
+
 def device_search_tool(server: str) -> str | None:
     """Name des Geräte-Such-Tools eines Servers (für die Vorauflösung), per Heuristik."""
     info = _cache.get(server)
@@ -114,6 +126,45 @@ def match_accel(message: str):
             if kw and kw in msg:
                 return server, search
     return None
+
+
+_HARVEST_STOP = {"und", "der", "die", "das", "mit", "von", "für", "auf", "aus", "bei", "neu", "alt",
+                 "links", "rechts", "oben", "unten", "auto", "the", "off", "on"}
+
+
+async def harvest_keywords(server: str) -> list[str]:
+    """Beschleunigungs-Stichwörter automatisch aus den ECHTEN Gerätenamen des Servers gewinnen
+    (erweiterungen.md 6.1) — beseitigt Lücken wie den „Bauwagen"-Fall dauerhaft.
+    Sammelt Geräte über Breitensuche (viele Server liefern bei häufigen Buchstaben alles)."""
+    tool = device_search_tool(server)
+    if not tool:
+        return []
+    import json as _json
+    names: set[str] = set()
+    for q in ("", "e", "a", "i", "o", "u", "r", "n", "l", "t", "s"):
+        try:
+            raw = await call_tool(server, tool, {"query": q, "limit": 200})
+            res = _json.loads(raw).get("result", []) or []
+        except Exception:
+            continue
+        for d in res:
+            if d.get("Name"):
+                names.add(str(d["Name"]))
+        if len(names) > 500:
+            break
+    words: set[str] = set()
+    for n in names:
+        for w in re.split(r"[^A-Za-zÄÖÜäöüß]+", n):
+            w = w.strip().lower()
+            if len(w) >= 3 and w not in _HARVEST_STOP:
+                words.add(w)
+    if not words:
+        return []
+    # Mit der Standardliste VEREINIGEN — generische Begriffe (temperatur/strom/schalte …) müssen
+    # erhalten bleiben, auch wenn kein Gerät so heißt.
+    kws = sorted(words | {k.lower() for k in DEFAULT_ACCEL_KEYWORDS})
+    set_keywords(server, ", ".join(kws))
+    return kws
 
 
 def device_tool_names(server: str, limit: int = 8) -> list[str]:
@@ -255,6 +306,8 @@ def catalog_hint() -> str:
             "toggle_switch, set_dimmer_level) mit diesem `idx`. Suche das Gerät mit den ORIGINAL-WÖRTERN DES "
             "NUTZERS (Gerätename wie gesagt, z.B. 'Licht', 'Wohnzimmer') — NICHT ins Englische übersetzen. "
             "Findet die Suche nichts, mit einem kürzeren/anderen deutschen Wort erneut suchen, nicht aufgeben. "
+            "STATUS-Fragen ('Ist das Licht an?', 'Wie warm…?'): steht das Gerät mit aktuellem Wert bereits "
+            "im Prompt (PASSENDE GERÄTE), antworte DIREKT daraus — kein Werkzeug nötig. "
             "Verfügbare Server/Tools:\n" + "\n".join(blocks))
 
 

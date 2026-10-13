@@ -45,6 +45,7 @@ import messaging
 import context_budget
 import profile as user_profile
 import calendars
+import router
 import plugins_registry
 import plugin_bus
 import api_v1
@@ -339,6 +340,24 @@ _TOOL_HINT = (
 )
 
 MAX_TOOL_STEPS = 8     # mehrstufige MCP-Abfragen (Gerät suchen → Wert lesen → …) brauchen mehr Schritte
+_AUTOM_YIELD_MAX_S = 45.0   # so lange wartet ein autonomer Lauf höchstens auf eine Chat-Pause
+_last_turn_ts = 0.0    # letzter Turn-Beginn (für den optionalen LLM-Keepalive, erweiterungen.md 4.1)
+_inflight_turns = 0    # laufende Nutzer-Turns (autonome Läufe warten darauf — siehe _interactive_busy)
+
+
+def _touch_turn() -> None:
+    """Zeitstempel „zuletzt war etwas los" setzen — hält _interactive_busy() auch während der
+    stillen Denkphase eines gestreamten Turns wahr."""
+    global _last_turn_ts
+    _last_turn_ts = time.time()
+
+
+def _interactive_busy() -> bool:
+    """Läuft gerade ein Nutzer-Turn (oder lief gerade einer)? Dann soll ein autonomer Lauf warten:
+    llama.cpp hat nur wenige Slots, und ein parallel laufender Selbstlauf verdrängt den
+    KV-Prefix-Cache des Nutzers (dann kostet dessen Antwort ~14 s Prefill statt 0,5 s) und
+    teilt sich zusätzlich die GPU (Decode fällt von ~38 auf 2–7 Tok/s)."""
+    return _inflight_turns > 0 or (time.time() - _last_turn_ts) < 8.0
 
 
 # Entwicklungs-/Programmier-Anfragen → adaptiver Modus schaltet aufs Denken (Wortgrenzen, DE+EN).
@@ -392,44 +411,213 @@ def _is_switch_command(message: str) -> bool:
 _SH_STOP = {"schalte", "schalt", "schalten", "mach", "mache", "machen", "bitte", "jarvis", "das",
             "den", "die", "der", "ein", "eine", "einen", "auf", "aus", "und", "ich", "mal", "kannst",
             "möchte", "will", "soll", "stell", "stelle", "setz", "setze", "dimme", "dimm", "öffne",
-            "schließe", "fahre", "hoch", "runter", "etwas", "mir", "ist", "wie", "alle", "wieder"}
+            "schließe", "fahre", "hoch", "runter", "etwas", "mir", "ist", "wie", "alle", "wieder",
+            "aktuell", "aktuelle", "aktuellen", "aktueller", "gerade", "grade", "jetzt", "momentan",
+            "derzeit", "eigentlich", "viel", "wieviel", "sage", "sag", "zeig", "zeige", "nenne"}
 
 
-async def _smarthome_device_hint(message: str, server: str, search_tool: str) -> str:
+# Gefragte GRÖSSE erkennen, um die Geräteliste danach zu sortieren: bei „wie warm" muss der
+# Temperatursensor oben stehen, nicht das Wohnzimmerlicht (das sonst „0,0 °C" liefert).
+_SH_TOPIC_RES = (
+    ("temp", re.compile(r"(warm|kalt|temperatur|grad|°c|feucht|luftfeucht)", re.IGNORECASE)),
+    ("energy", re.compile(r"(strom|watt|verbrauch|kwh|energie|leistung|zähler|zaehler|photovoltaik|solar)",
+                          re.IGNORECASE)),
+)
+
+
+def _sh_is_quantity_word(w: str) -> bool:
+    """True für Wörter, die die GRÖSSE benennen (strom, temperatur, watt …) statt das Gerät.
+    Die taugen schlecht als Suchwort: „Wie viel Strom verbraucht das Büro?" muss nach „büro"
+    suchen — nach „strom" findet Domoticz den Hauptzähler und die Antwort wäre falsch."""
+    return any(rx.search(w) for _, rx in _SH_TOPIC_RES)
+
+
+def _sh_topic(message: str) -> str:
+    for name, rx in _SH_TOPIC_RES:
+        if rx.search(message or ""):
+            return name
+    return ""
+
+
+def _sh_relevance(d: dict, topic: str) -> int:
+    """0 = Gerät liefert die gefragte Größe, 1 = nicht. Ohne erkennbare Größe alles gleich."""
+    if not topic:
+        return 0
+    hay = f"{d.get('Type', '')} {d.get('SubType', '')} {d.get('Data', '')} {d.get('Usage', '')}".lower()
+    if topic == "temp":
+        return 0 if ("temp" in hay or "humid" in hay or re.search(r"\d\s*(c|°c)\b", hay)) else 1
+    return 0 if ("usage" in hay or "energy" in hay or "kwh" in hay or "watt" in hay
+                 or re.search(r"\d\s*w\b", hay) or "p1" in hay or "counter" in hay) else 1
+
+
+_SH_STALE_S = 3 * 3600           # älter = toter/abgemeldeter Sensor → nach hinten sortieren
+
+
+def _sh_age_s(d: dict) -> float:
+    """Alter des Messwerts in Sekunden (Domoticz 'LastUpdate'). -1 = unbekannt."""
+    try:
+        return max(0.0, time.time() - datetime.strptime(str(d.get("LastUpdate")),
+                                                        "%Y-%m-%d %H:%M:%S").timestamp())
+    except Exception:
+        return -1.0
+
+
+def _sh_age_text(age: float) -> str:
+    """Kurzform des Alters für den Prompt — nur ab 15 min, sonst ist der Wert einfach aktuell."""
+    if age < 900:
+        return ""
+    if age < 7200:
+        return f", Stand vor {int(age // 60)} min"
+    if age < 172800:
+        return f", Stand vor {int(age // 3600)} h"
+    return f", Stand vor {int(age // 86400)} Tagen"
+
+
+_SH_READ_RE = re.compile(
+    r"(wie ?(warm|kalt|viel|hoch)|wieviel|temperatur|verbrauch|zählerstand|zaehlerstand|"
+    r"stromstand|watt|grad|luftfeucht|feuchtigkeit)", re.IGNORECASE)
+
+# Zweite Aufgabe oder zweites Gerät in derselben Äußerung → NICHT deterministisch antworten,
+# sonst fiele der zweite Teil still weg („…und notier das in Obsidian").
+_SH_MULTI_RE = re.compile(
+    r"(\bund\b|\boder\b|,|;|\bdann\b|außerdem|zusätzlich|notier|schreib|merk|speicher|"
+    r"sende|schick|erinner|timer|trag |lege |vergleich)", re.IGNORECASE)
+
+
+def _sh_num(text: str) -> str:
+    """Erste Zahl aus einem Domoticz-Wert, deutsch formatiert. Domoticz nutzt den PUNKT als
+    Dezimaltrenner („10.000 kWh" = zehn), darum nachlaufende Nullen entfernen — sonst liest
+    sich die Antwort als Tausender („10,000 kWh")."""
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(text or ""))
+    if not m:
+        return ""
+    try:
+        val = f"{float(m.group(0).replace(',', '.')):.2f}".rstrip("0").rstrip(".")
+    except ValueError:
+        return m.group(0).replace(".", ",")
+    return val.replace(".", ",")
+
+
+def _sh_fast_read(message: str, d: dict, topic: str, cfg: dict) -> str:
+    """Satz für eine eindeutige Messwert-Frage — ganz ohne LLM-Runde.
+    Der Wert ist serverseitig schon aufgelöst (MCP-Call ~50 ms); eine LLM-Runde formuliert ihn nur
+    um und kostet je nach GPU-Last 3–150 s. Analog zu _fast_confirm beim Schalten (4.2).
+    Greift NUR bei eindeutiger Lage: Lesefrage, kein Schaltbefehl, Gerät frisch und passend."""
+    if not cfg.get("smarthome_fast_read", True) or not topic:
+        return ""
+    if not _SH_READ_RE.search(message or "") or _is_switch_command(message):
+        return ""
+    if _SH_MULTI_RE.search(message or "") or len((message or "").split()) > 12:
+        return ""                             # mehrteilige/lange Anfrage → das Modell soll antworten
+    name = (d.get("Name") or "").strip()
+    if not name:
+        return ""
+    if topic == "temp":
+        val = _sh_num(d.get("Data"))
+        if not val:
+            return ""
+        out = f"{name}: {val} °C"
+        hum = re.search(r",\s*(\d+)\s*%", str(d.get("Data") or ""))
+        if hum:
+            out += f", {hum.group(1)} % Luftfeuchte"
+        return out + "."
+    usage = str(d.get("Usage") or "")
+    if usage and _sh_num(usage):
+        out = f"{name}: {_sh_num(usage)} Watt"
+        if d.get("CounterToday") not in (None, "", "None"):
+            out += f" (heute {_sh_num(d.get('CounterToday'))} kWh)"
+        return out + "."
+    if "kwh" in str(d.get("Data") or "").lower():
+        return f"{name}: {_sh_num(d.get('Data'))} kWh."
+    return ""
+
+
+def _sh_stems(w: str) -> list[str]:
+    """Deutsche Beugung abschneiden, damit die Teilstring-Suche greift:
+    „stromzählern" → „stromzähl" (findet „Stromzähler"), „lampen" → „lamp"."""
+    for suf in ("ern", "en", "er", "es", "em", "n", "e", "s"):
+        if len(w) > 6 and w.endswith(suf):
+            return [w[: -len(suf)]]
+    return []
+
+
+_sh_search_cache: dict = {}      # (server, wort) -> (result_list, ts) — 30-s-Cache (erweiterungen.md 6.3)
+_SH_CACHE_TTL = 30
+
+
+async def _smarthome_device_hint(message: str, server: str, search_tool: str,
+                                 ctx: dict | None = None) -> str:
     """Löst passende Geräte eines MCP-Servers VORAB serverseitig auf (Name→idx→Status/Messwert) und
     gibt einen kompakten Prompt-Block zurück. So antwortet das Modell bei Mess-Fragen ohne Tool und
     schaltet bei Befehlen direkt per `idx` — kein Such-Roundtrip, kein `name`-Fehlversuch (Haupt-Hebel
     gegen die Latenz: MCP-Call ~90 ms, aber jede LLM-Runde kostet Sekunden)."""
+    # Suchwörter in dieser Reihenfolge: (1) Stichwort-Treffer des Servers — die sind aus den
+    # echten Gerätenamen geharvestet und treffen daher; (2) Wörter des Nutzers, längste zuerst;
+    # (3) deren Stamm ohne deutsche Beugung. Ohne (1)/(3) scheiterte die Vorauflösung an
+    # Beugungen („Stromzählern" → 0 Treffer) und der Agent musste selbst suchen (+1 Runde).
     words = [w for w in re.findall(r"[a-zäöüß]+", (message or "").lower())
              if len(w) >= 4 and w not in _SH_STOP]
-    words.sort(key=len, reverse=True)        # längste/spezifischste zuerst (z.B. "wohnzimmerlicht")
+    words = mcp_hub.matched_keywords(server, message) + words
+    words += [st for w in words for st in _sh_stems(w)]
+    # Gerät/Raum zuerst, Größenwort zuletzt; innerhalb der Gruppe das längste/spezifischste zuerst.
+    words.sort(key=lambda w: (1 if _sh_is_quantity_word(w) else 0, -len(w)))
+    words = list(dict.fromkeys(words))       # Reihenfolge erhalten, Duplikate raus
+    topic = _sh_topic(message)
     seen, scored, last_err, got_exact = set(), [], None, False
-    for w in words[:4]:
-        res = None
-        for _ in range(2):                   # ein Retry: MCP-Verbindung pro Aufruf ist gelegentlich flaky
-            try:
-                parsed = json.loads(await mcp_hub.call_tool(server, search_tool, {"query": w, "limit": 12}))
-                res = parsed.get("result", []) if isinstance(parsed, dict) else []
-                break
-            except Exception as e:
-                last_err = str(e)[:200]
-                res = None
+    for w in words[:6]:
+        cached = _sh_search_cache.get((server, w))     # Folge-Kommandos („…und jetzt aus") sparen Roundtrips
+        if cached and time.time() - cached[1] < _SH_CACHE_TTL:
+            res = cached[0]
+        else:
+            res = None
+            for _ in range(2):               # ein Retry: MCP-Verbindung pro Aufruf ist gelegentlich flaky
+                try:
+                    parsed = json.loads(await mcp_hub.call_tool(server, search_tool, {"query": w, "limit": 12}))
+                    res = parsed.get("result", []) if isinstance(parsed, dict) else []
+                    _sh_search_cache[(server, w)] = (res, time.time())
+                    if len(_sh_search_cache) > 200:
+                        _sh_search_cache.clear()
+                    break
+                except Exception as e:
+                    last_err = str(e)[:200]
+                    res = None
         for d in (res or []):
             idx = d.get("idx") or d.get("ID")
             if idx in seen:
                 continue
             seen.add(idx)
-            exact = w in (d.get("Name") or "").lower()   # Suchwort im Gerätenamen = sehr relevant
-            got_exact = got_exact or exact
-            scored.append((0 if exact else 1, d))
-        if got_exact:                        # spezifischer Treffer reicht — spart weitere Suchen
+            name = (d.get("Name") or "").lower()
+            # Namens-Güte: 0 = Name IST/BEGINNT mit dem Suchwort („Stromzähler" für „strom"),
+            # 1 = enthält es nur („Büro-Strom"), 2 = gar nicht. Entscheidet mit darüber, ob die
+            # Lage eindeutig genug für eine Antwort ohne Modell ist.
+            nq = 0 if name.startswith(w) else (1 if w in name else 2)
+            rel = _sh_relevance(d, topic)               # liefert das Gerät die gefragte Größe?
+            age = _sh_age_s(d)
+            stale = 1 if age > _SH_STALE_S else 0       # toter Sensor (z.B. „Wohnzimmer 0,0 °C" von gestern)
+            got_exact = got_exact or (nq < 2 and rel == 0 and not stale)
+            scored.append((stale, rel, nq, age if age >= 0 else 0.0, d))
+        if got_exact:                        # frischer, passender, benannter Treffer reicht
             break
-    scored.sort(key=lambda x: x[0])          # exakte Namens-Treffer zuerst
-    devices = [d for _, d in scored][:10]
-    debug.log("smarthome_hint", server=server, words=words[:4], found=len(devices),
+    # frisch vor veraltet → passende Größe → Namens-Güte → jüngster Messwert
+    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    devices = [d for *_, d in scored][:4]    # nur die besten: lange Listen = langes Abwägen
+    debug.log("smarthome_hint", server=server, words=words[:6], found=len(devices), topic=topic,
+              devices=[f"{d.get('Name')} [{d.get('Type')}] {d.get('Data')}"
+                       f"{_sh_age_text(_sh_age_s(d)) or ', aktuell'}" for d in devices],
               error=last_err if not devices else None)
+    if ctx is not None:                      # idx→Name für Fast-Confirm merken (erweiterungen.md 4.2)
+        ctx["accel_devices"] = {str(d.get("idx") or d.get("ID")): d.get("Name") for d in devices}
     if not devices:
         return ""
+    # Eindeutig? Bestes Gerät frisch (0), liefert die gefragte Größe (0), Name beginnt mit dem
+    # Suchwort (0) UND es gibt keinen gleichwertigen Zweiten — sonst entscheidet das Modell
+    # (z.B. „Strom im Büro": Büro-Strom vs. Büro LED-Wand ist echte Mehrdeutigkeit).
+    _unique = bool(scored) and scored[0][:3] == (0, 0, 0) and (
+        len(scored) == 1 or scored[1][:3] > scored[0][:3])
+    if ctx is not None and _unique:
+        fast = _sh_fast_read(message, devices[0], topic, (ctx.get("cfg") or {}))
+        if fast:
+            ctx["fast_read"] = fast
 
     def _fmt(d):
         parts = [f"Status {d.get('Data')}"]
@@ -438,16 +626,25 @@ async def _smarthome_device_hint(message: str, server: str, search_tool: str) ->
             parts.append(f"aktuell {d.get('Usage')}")
         if d.get("CounterToday") not in (None, "", "None"):
             parts.append(f"heute {d.get('CounterToday')}")
-        return f"- {d.get('Name')} → idx {d.get('idx') or d.get('ID')} ({d.get('Type')}, {', '.join(parts)})"
+        return (f"- {d.get('Name')} → idx {d.get('idx') or d.get('ID')} "
+                f"({d.get('Type')}, {', '.join(parts)}{_sh_age_text(_sh_age_s(d))})")
 
-    lines = [_fmt(d) for d in devices[:10]]
+    lines = [_fmt(d) for d in devices]
     return ("\n\nPASSENDE GERÄTE (für diese Anfrage SOEBEN live aufgelöst, Werte sind AKTUELL und GÜLTIG):\n"
             + "\n".join(lines) +
             "\n→ Beantworte Mess-/Verbrauchsfragen DIREKT mit dem Wert oben (z.B. der 'aktuell …'-Wert in "
-            "Watt/°C) — KEIN Werkzeug nötig. Behaupte NIEMALS, ein Gerät sei 'nicht erreichbar' oder "
+            "Watt/°C) — KEIN Werkzeug nötig, KEIN langes Abwägen: nimm das am besten passende Gerät "
+            "(steht ganz oben) und antworte in EINEM kurzen Satz. Zähle nicht alle Geräte auf. "
+            "Diese Liste ist die EINZIGE Quelle für Gerätewerte — benutze dafür NIEMALS web_search, "
+            "fetch_url oder research; im Web stehen deine Messwerte nicht. "
+            "Steht bei einem Gerät „Stand vor …“, meldet es sich nur seltener: nenne das Alter kurz mit. "
+            "Ist ein Wert offensichtlich tot (z.B. 0,0 °C von gestern), nimm das nächste Gerät der Liste. Behaupte NIEMALS, ein Gerät sei 'nicht erreichbar' oder "
             "'nicht verfügbar', wenn es oben steht (ignoriere ältere solche Aussagen im Verlauf). "
             "Zum Schalten/Dimmen das passende Werkzeug DIREKT mit der `idx` aufrufen (KEINE Geräte-Suche, "
-            "KEIN `name`-Parameter).")
+            "KEIN `name`-Parameter). Schalte dabei GENAU EIN Gerät: das, dessen Name der Äußerung des "
+            "Nutzers exakt entspricht (steht ganz oben). Passen mehrere und keines exakt, frage kurz nach, "
+            "welches gemeint ist. NIEMALS mehrere Geräte auf einmal schalten, außer der Nutzer sagt "
+            "ausdrücklich 'alle'/'überall'.")
 
 
 # Vision-Modelle antworten auf Aufgaben, die sie im Bild nicht lösen können, gern mit
@@ -531,7 +728,13 @@ async def _prepare_turn(req: ChatRequest):
             answering_onboarding = True
             hub.set_onboarding_state(sid, "skipped")
 
-    system = cfg["system_prompt"] + _TOOL_HINT + _now_hint() + _connected_clients_hint()
+    # Cache-freundliche Prompt-Ordnung (erweiterungen.md 11.1): erst ALLE stabilen Blöcke
+    # (Persona, Tool-Hint, Skill-/MCP-Kataloge) → der llama.cpp-Prefix-Cache trifft damit
+    # turn-übergreifend statt an der minütlich wechselnden Uhrzeit abzubrechen. Alles Volatile
+    # (Zeit, verbundene Geräte, Identität, Gedächtnis, Hints) folgt DANACH.
+    system = (cfg["system_prompt"] + _TOOL_HINT + tools.deferred_catalog_hint()
+              + skills.catalog_hint() + mcp_hub.catalog_hint()
+              + _now_hint() + _connected_clients_hint())
     if identity:
         system += (f"\n\nAktueller Sprecher (per Stimme erkannt): {identity['username']}. "
                    "Beantworte Fragen zur Person und die Frage wer-bin-ich AUSSCHLIESSLICH anhand dieser Identität "
@@ -607,21 +810,71 @@ async def _prepare_turn(req: ChatRequest):
                    "rufe das Werkzeug nicht erneut auf, wenn die Antwort hier schon steht):\n" +
                    "\n".join(f"- [{x['name']}] {x['result']}" for x in _last_tools))
 
-    system += skills.catalog_hint()           # deferred: nur Namen+Beschreibung der vorhandenen Skills
-    system += mcp_hub.catalog_hint()          # deferred: MCP-Server als Katalog (Tools on demand laden)
+    # (Skill-/MCP-Kataloge stehen jetzt im STABILEN Prompt-Präfix ganz oben — 11.1)
     # MCP-Beschleunigung: passt der Text zu den Stichwörtern eines MCP-Servers (Admin-UI, je Server),
     # die Geräte VORAB auflösen + idx/Messwert in den Prompt → Ein-Schritt-Antwort/-Schaltbefehl.
     _accel = mcp_hub.match_accel(req.message)
     if _accel:
+        # Geräte-Werkzeuge SOFORT vorladen und das im Prompt sagen: der MCP-Katalog fordert sonst
+        # generisch „erst load_mcp_tools" — das Modell drehte dafür eine komplette Extra-Runde
+        # (gemessen 14 s Prefill + bis zu 27 s Denken), obwohl die Werkzeuge schon eingeblendet waren.
+        ctx["loaded_mcp"] = mcp_hub.device_tool_names(_accel[0])
         try:
-            system += await _smarthome_device_hint(req.message, _accel[0], _accel[1])
+            system += await _smarthome_device_hint(req.message, _accel[0], _accel[1], ctx)
         except Exception:
             pass
-    history = context_budget.fit(sid, system, list(hub.history(sid)), req.message, cfg)
+        if ctx["loaded_mcp"]:
+            system += ("\n\nGERÄTE-WERKZEUGE SIND BEREITS GELADEN und unten eingeblendet — rufe sie DIREKT "
+                       "auf, KEIN load_mcp_tools und KEIN search_mcp_tools dafür: "
+                       + ", ".join(ctx["loaded_mcp"]) + ".")
+    # Kalender/To-do-Vorauflösung (11.5): Agenda direkt in den Prompt bei passenden Fragen.
+    if user_id and cfg.get("calendar_enabled", True) and _AGENDA_RE.search(req.message):
+        try:
+            system += await _agenda_hint(user_id, cfg)
+        except Exception:
+            pass
+    # ── Werkzeug-Liste: klein UND über Turns hinweg IDENTISCH ─────────────────
+    # Der Tool-Block wird VOR den System-Text gerendert; jede Änderung entwertet den
+    # KV-Prefix-Cache des ganzen Prompts (roadmap 2026-10-12). Deshalb: Kernliste in
+    # stabiler Reihenfolge, Rest per Katalog + load_tools nachladbar.
+    available_tools = tools.core_schemas()
+    # Vorab laden statt nachladen: ein load_tools-Aufruf kostet eine ganze Extra-Runde UND
+    # ändert die Tool-Liste mitten im Turn (= nochmal voller Prefill). Bei klar erkennbaren
+    # Aufgabentypen lohnt sich das Vorladen deshalb; innerhalb einer Dev-Session (~15 min)
+    # bleibt die Liste dabei stabil.
+    _preload: set = set()
+    if _is_dev_request(req.message) or hub.is_dev(sid):
+        _preload |= set(tools.preload_names(tools.DEV_PRELOAD_GROUPS))
+    if _AUTOM_RE.search(req.message):
+        _preload |= set(tools.preload_names(("Automatisierungen",)))
+    if _preload:
+        ctx["loaded_tools"] = _preload
+    # Embedding-Router (11.3): nur noch optional — er macht den Prompt kürzer, wechselt die
+    # Liste aber pro Thema und kostete damit mehr Prefill (16–24 s) als er sparte.
+    if cfg.get("tool_router_enabled", False):
+        try:
+            routed, rinfo = await asyncio.to_thread(router.filter_tools, available_tools, req.message, cfg)
+            if rinfo:
+                available_tools = routed
+                ctx["routed"] = rinfo
+        except Exception:
+            pass
+    # Denk-Retry nutzt dieselbe Liste (eine andere Liste = garantierter Cache-Verlust).
+    ctx["all_tools"] = available_tools
+    # Tool-Schemas zählen fürs Kontext-Budget mit — sie sind der größte Prompt-Posten.
+    _tool_tokens = context_budget.estimate_tokens(
+        json.dumps(available_tools, ensure_ascii=False)
+        + json.dumps(tools.schemas_for(ctx.get("loaded_tools")), ensure_ascii=False)
+        + json.dumps(mcp_hub.schemas_for(ctx.get("loaded_mcp")), ensure_ascii=False), cfg)
+    history = context_budget.fit(sid, system, list(hub.history(sid)), req.message, cfg,
+                                 extra_tokens=_tool_tokens)
     working = [{"role": "system", "content": system}] + history + \
               [{"role": "user", "content": req.message}]
-    # MCP-Tools sind deferred: nicht alle Schemas einblenden, sondern via Katalog + load_mcp_tools.
-    available_tools = list(tools.TOOL_SCHEMAS)
+    # Kontextfenster-Nutzung messen (erweiterungen.md 4.5) + Aktivität für Keepalive (4.1)
+    global _last_turn_ts
+    _last_turn_ts = time.time()
+    cpt = float(cfg.get("chars_per_token", 3.0)) or 3.0
+    ctx["prompt_est_tokens"] = int(sum(len(m.get("content") or "") for m in working) / cpt) + _tool_tokens
     # Denken steuerbar:
     #   auto     = Onboarding/Identität ODER MCP-Tools verfügbar (mehrstufig → Reasoning)
     #   adaptive = erst ohne Denken (schnell); bei Fehlschlag automatisch mit Denken wiederholen
@@ -646,7 +899,6 @@ async def _prepare_turn(req: ChatRequest):
     # Nutzer schon den Fehlsatz hören ließe). Dank Vorauflösung braucht der Read-Fall 0 Tools → trotz
     # Denken nur EINE LLM-Runde; mode=always überspringt den adaptiven Fast-Pass.
     if _accel:
-        ctx["loaded_mcp"] = mcp_hub.device_tool_names(_accel[0])
         if _is_switch_command(req.message):
             # Schaltbefehl: schneller No-Think-Pass (idx vorab aufgelöst → 1 Tool-Call, ~11 s).
             # think/mode bleiben adaptive → bei Fehlschlag greift der Retry MIT Denken als Netz.
@@ -799,27 +1051,112 @@ def _degenerate_calls(calls: list, seen: dict) -> bool:
     return False
 
 
+# Wiederkehrende/ereignisgesteuerte Aufträge → Automatisierungs-Werkzeuge vorab laden
+# (NICHT bei einfachem „erinnere mich in 10 Minuten" — das ist ein Timer, der im Kern steckt).
+_AUTOM_RE = re.compile(
+    r"(automatisier\w*|jeden (morgen|abend|tag|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)|"
+    r"jede[ns]? (woche|monat|stunde)|täglich|wöchentlich|monatlich|regelmäßig|immer wenn|jedes mal wenn|"
+    r"sobald .{0,40}(passiert|eintritt|ist)|überwach\w*)", re.IGNORECASE)
+
+
+# Agenda-Vorauflösung (erweiterungen.md 11.5): bei Kalender-/Todo-Fragen die heutigen/morgigen
+# Termine + offene To-dos VORAB in den Prompt — häufige Alltagsfragen werden 0-Tool-Antworten
+# (dasselbe Muster, das Smart-Home von 3–6 auf 0–1 Calls gebracht hat).
+_AGENDA_RE = re.compile(
+    r"(termin\w*|kalender|agenda|to-?do\w*|aufgabe\w*|erledig\w*|anstehen\w*|steht.{0,12}(heute|morgen|an)|"
+    r"was.{0,20}(heute|morgen).{0,20}(los|vor|an)|wochenplan|verabredung)", re.IGNORECASE)
+
+
+async def _agenda_hint(user_id: int, cfg: dict) -> str:
+    if not user_id or not cfg.get("preresolve_agenda", True):
+        return ""
+    try:
+        now = datetime.now()
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=2)                      # heute + morgen
+        evs = await asyncio.to_thread(calendars.list_events, user_id, start, end)
+        tds = await asyncio.to_thread(_todos.list_todos, user_id)
+    except Exception:
+        return ""
+    lines = []
+    for e in (evs or [])[:10]:
+        lines.append(f"- Termin: {e.get('title')} — {str(e.get('start'))[:16]}"
+                     + (f" bis {str(e.get('end'))[:16]}" if e.get("end") else ""))
+    for t in (tds or [])[:10]:
+        lines.append(f"- To-do: {t.get('text')}" + (f" (fällig {t.get('due')})" if t.get("due") else ""))
+    if not lines:
+        return ("\n\nAGENDA (soeben live geladen): Für heute/morgen sind KEINE Termine eingetragen und die "
+                "To-do-Liste ist leer — antworte direkt so, KEIN Werkzeug nötig.")
+    return ("\n\nAGENDA (soeben live geladen, aktuell und vollständig für heute/morgen + offene To-dos):\n"
+            + "\n".join(lines) +
+            "\n→ Beantworte Fragen dazu DIREKT aus dieser Liste (kein list_events/list_todos nötig). "
+            "Zum ÄNDERN/ANLEGEN weiterhin die Werkzeuge nutzen.")
+
+
+# Fast-Confirm (erweiterungen.md 4.2): Nach einem ERFOLGREICHEN Schalt-/Dimm-Befehl auf einem
+# vorab aufgelösten Gerät die Bestätigung deterministisch bauen statt eine ganze LLM-Runde
+# nur für „Das Licht ist an." zu drehen (~5 s gespart).
+_FC_TOOLS = {"set_switch_state", "toggle_switch", "set_dimmer_level", "control_blinds", "switch_scene"}
+
+
+def _fast_confirm(tool_name: str, args: dict, result: str, ctx: dict, cfg: dict) -> str | None:
+    if not cfg.get("smarthome_fast_confirm", True):
+        return None
+    devs = ctx.get("accel_devices") or {}
+    if not devs or not tool_name.startswith("mcp__"):
+        return None
+    short = tool_name.split("__")[-1]
+    if short not in _FC_TOOLS:
+        return None
+    if '"status"' not in str(result) or '"OK"' not in str(result):
+        return None
+    dev = devs.get(str((args or {}).get("idx"))) or (args or {}).get("name") or "Das Gerät"
+    state = str((args or {}).get("state") or (args or {}).get("action") or "").lower()
+    if short == "set_switch_state":
+        return f"{dev} ist jetzt {'an' if state == 'on' else 'aus' if state == 'off' else state}."
+    if short == "toggle_switch":
+        return f"{dev} wurde umgeschaltet."
+    if short == "set_dimmer_level":
+        return f"{dev} ist jetzt auf {(args or {}).get('level', '?')} % gedimmt."
+    if short == "control_blinds":
+        act = {"open": "fährt hoch", "close": "fährt runter", "stop": "wurde gestoppt"}.get(state, "ausgeführt")
+        return f"{dev} {act}."
+    if short == "switch_scene":
+        return f"Szene {dev} ausgeführt."
+    return None
+
+
 async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: list, think: bool) -> dict:
     """Tool-Loop (nicht streamend) auf einer Kopie des Verlaufs. Gibt {ok, content} zurück.
     ok=False bei: zu vielen Schritten, leerer Antwort oder LLM-Fehler (→ Trigger für adaptiven Retry)."""
+    global _inflight_turns
     working = list(base_working)
     seen: dict = {}
-    for _ in range(MAX_TOOL_STEPS):
+    for step in range(MAX_TOOL_STEPS):
         t0 = time.time()
-        tools_now = (available_tools + skills.schemas_for(ctx.get("loaded_skills"))    # deferred: geladene Skills
+        tools_now = (available_tools + tools.schemas_for(ctx.get("loaded_tools"))      # deferred: per load_tools
+                     + skills.schemas_for(ctx.get("loaded_skills"))                    # deferred: geladene Skills
                      + mcp_hub.schemas_for(ctx.get("loaded_mcp")))                     # deferred: geladene MCP-Tools
+        _tr = int(cfg.get("thinking_rounds", 0) or 0)            # 0 = alle Runden (Präfix stabil)
+        think_now = think and (not _tr or step < _tr)
+        _inflight_turns += 1                      # Selbstläufe warten, solange hier etwas läuft
         try:
-            res = await asyncio.to_thread(services.llm_call, working, cfg, tools_now, think)
+            res = await asyncio.to_thread(services.llm_call, working, cfg, tools_now, think_now)
         except Exception as e:
-            debug.log("llm_error", think=think, error=str(e)[:200])
+            debug.log("llm_error", think=think_now, error=str(e)[:200])
             return {"ok": False, "content": "", "error": str(e)}
-        debug.log("llm", think=think, ms=int((time.time() - t0) * 1000),
-                  tool_calls=[t["name"] for t in res["tool_calls"]], content_len=len(res["content"]))
+        finally:
+            _inflight_turns -= 1
+        debug.log("llm", session=ctx.get("session_id"), autonomous=bool(ctx.get("autonomous")),
+                  think=think_now, step=step, ms=int((time.time() - t0) * 1000),
+                  tool_calls=[t["name"] for t in res["tool_calls"]], content_len=len(res["content"]),
+                  **services.timing_info(res.get("timings")))
         if res["tool_calls"]:
             if len(res["tool_calls"]) > _MAX_CALLS_PER_STEP:      # absurd viele auf einmal = Degeneration
                 debug.log("tool_loop_abort", count=len(res["tool_calls"]))
                 return {"ok": False, "content": _LOOP_MSG, "error": "tool-loop"}  # ok=False → adaptiv mit Denken neu
             working.append(res["raw"])
+            fcs = []                                             # Fast-Confirm-Sätze (4.2)
             for tc in res["tool_calls"]:
                 key = tc["name"] + "|" + json.dumps(tc.get("args") or {}, sort_keys=True)
                 if key in seen:                                  # identischer Aufruf → Cache + Nudge statt erneut
@@ -829,6 +1166,10 @@ async def _run_loop(cfg: dict, ctx: dict, base_working: list, available_tools: l
                     result = _clamp_tool_result(await tools.execute_tool(tc["name"], tc["args"], ctx))
                     seen[key] = result
                 working.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                fcs.append(_fast_confirm(tc["name"], tc.get("args") or {}, result, ctx, cfg))
+            if fcs and all(fcs):                                 # ALLE Calls fast-confirmable → LLM-Runde sparen
+                debug.log("fast_confirm", tools=[t["name"] for t in res["tool_calls"]])
+                return {"ok": True, "content": " ".join(fcs)}
             if len(seen) > 12:                                   # zu viele UNTERSCHIEDLICHe Aufrufe → Notbremse
                 debug.log("tool_loop_abort", unique=len(seen))
                 return {"ok": False, "content": _LOOP_MSG, "error": "tool-loop"}
@@ -848,18 +1189,27 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
         hub.append_history(sid, "assistant", onboarding_q)
         debug.log("turn_done", channel=channel, onboarding=True, reply=onboarding_q[:120])
         return onboarding_q, identity
+    if ctx.get("fast_read"):                  # Messwert steht schon fest → keine LLM-Runde (4.2)
+        answer = ctx["fast_read"]
+        hub.append_history(sid, "user", req.message)
+        hub.append_history(sid, "assistant", answer)
+        _index_conversation_bg(ctx, answer)   # für späteres Erinnern; Profil-Lauf bewusst nicht
+        debug.log("turn_done", channel=channel, fast_read=True, ms=0, reply=answer[:120])
+        return answer, identity
     t0 = time.time()
     r = await _run_loop(cfg, ctx, base_working, available_tools, think)
     retried = False
+    _full_tools = ctx.get("all_tools") or available_tools    # identische Liste (Cache!), nur MIT Denken
     if mode == "adaptive" and not r["ok"]:
         debug.log("retry", reason="adaptive: 1. Versuch ohne Denken ohne Ergebnis")
-        r = await _run_loop(cfg, ctx, base_working, available_tools, True)
+        r = await _run_loop(cfg, ctx, base_working, _full_tools, True)
         retried = True
-    # Halluzinierter Erfolg (behauptet getan, aber kein Tool aufgerufen) → mit Denken erzwingen (#10).
-    if mode == "adaptive" and not retried and _is_unverified_claim(r.get("content", ""), ctx):
-        debug.log("retry", reason="unverifizierte Erfolgsbehauptung → erneut mit Denken")
+    # Halluzinierter Erfolg ODER Fehlschlag (behauptet, ohne Tool-Beleg) → mit Denken erzwingen (#10/1.2).
+    _reason = None if (mode != "adaptive" or retried) else _needs_think_retry(r.get("content", ""), ctx)
+    if _reason:
+        debug.log("retry", reason=_reason + " → erneut mit Denken")
         ctx["turn_tools"], ctx["turn_tool_calls"] = [], []
-        r2 = await _run_loop(cfg, ctx, base_working, available_tools, True)
+        r2 = await _run_loop(cfg, ctx, base_working, _full_tools, True)
         retried = True
         if r2.get("content"):
             r = r2
@@ -867,7 +1217,7 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
     hub.append_history(sid, "user", f"[Bild gesendet] {req.message}".strip() if req.image else req.message)
     hub.append_history(sid, "assistant", content)
     _finalize_turn(ctx, sid, content)
-    debug.log("turn_done", channel=channel, ms=int((time.time() - t0) * 1000),
+    debug.log("turn_done", channel=channel, ms=int((time.time() - t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
               retried=retried, reply=content[:300])
     return content, identity
 
@@ -930,24 +1280,34 @@ async def chat_stream(req: ChatRequest):
         loop = asyncio.get_running_loop()
         working = list(base_working)
         seen: dict = {}
+        # Mit Denken (Retry-Pfad) IMMER die volle Tool-Liste — Router-Fehlrouting kostet so
+        # höchstens den schnellen Pass (erweiterungen.md 11.3).
+        # Dieselbe Liste in JEDEM Pass — eine andere Tool-Liste kostet den ganzen Prefix-Cache.
+        base_tools = available_tools
         for step in range(MAX_TOOL_STEPS):
             if hub.is_cancelled(sid):                 # #12 Barge-in: vor jedem Schritt prüfen
                 yield ("cancelled", ""); return
             if step > 0:                              # #11 Fortschritt: nach einer Werkzeug-Runde
                 yield ("status", "denke weiter…")
             q: asyncio.Queue = asyncio.Queue()
-            tools_now = (available_tools + skills.schemas_for(ctx.get("loaded_skills"))    # deferred: Skills
+            tools_now = (base_tools + tools.schemas_for(ctx.get("loaded_tools"))           # deferred: load_tools
+                         + skills.schemas_for(ctx.get("loaded_skills"))                    # deferred: Skills
                          + mcp_hub.schemas_for(ctx.get("loaded_mcp")))                     # deferred: MCP-Tools
+            # Denk-Runden begrenzen (nur bei Vorlagen sinnvoll, die den Denk-Schalter am Prompt-ENDE
+            # abbilden — sonst kostet die Umschaltung den ganzen Prefix-Cache). 0 = alle Runden.
+            _tr = int(cfg.get("thinking_rounds", 0) or 0)
+            think_now = use_think and (not _tr or step < _tr)
 
             def produce():
                 try:
-                    for ev in services.llm_stream(working, cfg, tools_now, use_think):
+                    for ev in services.llm_stream(working, cfg, tools_now, think_now):
                         loop.call_soon_threadsafe(q.put_nowait, ev)
                 except Exception as e:
                     loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "detail": str(e)})
                 loop.call_soon_threadsafe(q.put_nowait, None)
 
             import threading as _th
+            _ts = time.time()
             _th.Thread(target=produce, daemon=True).start()
 
             done = None
@@ -956,6 +1316,7 @@ async def chat_stream(req: ChatRequest):
                     # Poll mit Timeout → Barge-in (#12) greift auch in der stillen Denkphase, nicht nur nach Sätzen.
                     ev = await asyncio.wait_for(q.get(), timeout=0.25)
                 except asyncio.TimeoutError:
+                    _touch_turn()                 # Turn läuft noch (Denkphase) → Selbstläufe warten
                     if hub.is_cancelled(sid):
                         yield ("cancelled", ""); return
                     continue
@@ -969,11 +1330,16 @@ async def chat_stream(req: ChatRequest):
                     yield ("error", ev["detail"]); return
                 elif ev["type"] == "done":
                     done = ev
+                    debug.log("llm", channel="stream", session=sid, think=think_now, step=step,
+                              ms=int((time.time() - _ts) * 1000), ttfb_ms=ev.get("ttfb_ms"),
+                              tool_calls=[t["name"] for t in ev["tool_calls"]],
+                              content_len=len(ev["content"]), **services.timing_info(ev.get("timings")))
             if done and done["tool_calls"]:
                 if len(done["tool_calls"]) > _MAX_CALLS_PER_STEP:
                     debug.log("tool_loop_abort", channel="stream", count=len(done["tool_calls"]))
                     yield ("final", _LOOP_MSG); return
                 working.append(done["raw"])
+                fcs = []                                          # Fast-Confirm-Sätze (4.2)
                 for tc in done["tool_calls"]:
                     if hub.is_cancelled(sid):         # #12 Barge-in: vor jedem Werkzeug-Aufruf prüfen
                         yield ("cancelled", ""); return
@@ -986,6 +1352,12 @@ async def chat_stream(req: ChatRequest):
                         result = _clamp_tool_result(await tools.execute_tool(tc["name"], tc["args"], ctx))
                         seen[key] = result
                     working.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                    fcs.append(_fast_confirm(tc["name"], tc.get("args") or {}, result, ctx, cfg))
+                if fcs and all(fcs):                              # deterministische Bestätigung statt LLM-Runde
+                    debug.log("fast_confirm", channel="stream", tools=[t["name"] for t in done["tool_calls"]])
+                    text = " ".join(fcs)
+                    yield ("sentence", text)
+                    yield ("final", text); return
                 if len(seen) > 12:
                     debug.log("tool_loop_abort", channel="stream", unique=len(seen))
                     yield ("final", _LOOP_MSG); return
@@ -1002,6 +1374,16 @@ async def chat_stream(req: ChatRequest):
             hub.append_history(sid, "assistant", onboarding_q)   # nur die Frage
             debug.log("turn_done", channel="stream", onboarding=True, reply=onboarding_q[:120])
             yield _sse("done", {"content": onboarding_q, "speaker": identity})
+            return
+        if ctx.get("fast_read"):              # Messwert steht schon fest → keine LLM-Runde (4.2)
+            answer = ctx["fast_read"]
+            yield _sse("sentence", {"text": answer})
+            hub.append_history(sid, "user", req.message)
+            hub.append_history(sid, "assistant", answer)
+            _index_conversation_bg(ctx, answer)
+            debug.log("turn_done", channel="stream", fast_read=True,
+                      ms=int((time.time() - _t0) * 1000), reply=answer[:120])
+            yield _sse("done", {"content": answer, "speaker": identity})
             return
         # ── adaptive: schneller Vorab-Versuch ohne Denken ──────────────────────
         if mode == "adaptive":
@@ -1024,8 +1406,9 @@ async def chat_stream(req: ChatRequest):
             ctx.pop("status_cb", None)
             r = task.result()
             # Halluzinierter Erfolg → Schnell-Pass verwerfen, mit Denken streamen (#10).
-            if r["ok"] and _is_unverified_claim(r["content"], ctx):
-                debug.log("retry", reason="unverifizierte Erfolgsbehauptung → erneut mit Denken")
+            _reason = _needs_think_retry(r["content"], ctx) if r["ok"] else None
+            if _reason:
+                debug.log("retry", reason=_reason + " → erneut mit Denken")
                 ctx["turn_tools"], ctx["turn_tool_calls"] = [], []
                 r = {"ok": False}
             if r["ok"]:
@@ -1035,12 +1418,14 @@ async def chat_stream(req: ChatRequest):
                 hub.append_history(sid, "user", req.message)
                 hub.append_history(sid, "assistant", final)
                 _finalize_turn(ctx, sid, final)
-                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
+                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
                           retried=False, reply=final[:300])
                 yield _sse("done", {"content": final, "speaker": identity})
                 return
             debug.log("retry", reason="adaptive: 1. Versuch ohne Denken ohne Ergebnis")
             use_think = True            # Fehlschlag → zweiter Versuch MIT Denken (gestreamt)
+            # (Volle Tool-Liste im Denk-Retry wählt _stream_pass selbst — KEINE Zuweisung an die
+            # Closure-Variable hier: die machte `available_tools` im Generator lokal → UnboundLocalError.)
         else:
             use_think = think
 
@@ -1051,7 +1436,7 @@ async def chat_stream(req: ChatRequest):
                 yield _sse("status", {"text": data})
             elif kind == "cancelled":         # #12 Barge-in: Turn vom Nutzer unterbrochen
                 hub.clear_cancel(sid)
-                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
+                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
                           cancelled=True, reply=final[:120])
                 if final:                     # bereits Gesagtes festhalten, damit der Verlauf stimmt
                     hub.append_history(sid, "user", req.message)
@@ -1068,7 +1453,7 @@ async def chat_stream(req: ChatRequest):
                 yield _sse("sentence", {"text": msg})
                 hub.append_history(sid, "user", req.message)
                 hub.append_history(sid, "assistant", msg)
-                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
+                debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
                           retried=(mode == "adaptive"), error=True, reply=msg)
                 yield _sse("done", {"content": msg, "speaker": identity})
                 return
@@ -1077,7 +1462,7 @@ async def chat_stream(req: ChatRequest):
         hub.append_history(sid, "user", req.message)
         hub.append_history(sid, "assistant", final)
         _finalize_turn(ctx, sid, final)
-        debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000),
+        debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
                   retried=(mode == "adaptive"), reply=final[:300])
         yield _sse("done", {"content": final, "speaker": identity})
 
@@ -1240,6 +1625,14 @@ async def announce(session_id: str, text: str, *, kind: str = "notify", **meta) 
 async def _run_automation(autom: dict, payload: dict | None) -> str:
     """Runner für den AutomationManager. Watcher = günstiger Skript-Check, LLM nur bei Treffer;
     sonst klassischer autonomer Agenten-Tool-Loop."""
+    # Dem Nutzer den Vortritt lassen: auf niemanden wartet hier live eine Antwort, auf seine schon.
+    waited = 0.0
+    while _interactive_busy() and waited < _AUTOM_YIELD_MAX_S:
+        await asyncio.sleep(1.5)
+        waited += 1.5
+    if waited:
+        debug.log("automation_deferred", id=autom.get("id"), title=autom.get("title"),
+                  waited_s=round(waited, 1))
     pj = _plugin_job_meta(autom)
     if pj:
         return await _run_plugin_job(autom, pj, payload)
@@ -1265,10 +1658,12 @@ async def _automation_llm_run(autom: dict, payload: dict | None, extra_user: str
               "Erledige sie selbstständig mit den verfügbaren Werkzeugen. "
               "Gibt es nach Erledigung NICHTS Berichtenswertes für den Nutzer, antworte AUSSCHLIESSLICH mit dem Wort "
               "SILENT. Andernfalls formuliere eine kurze, natürliche deutsche Meldung, die dem Nutzer proaktiv "
-              "mitgeteilt wird." + _now_hint() + sat + ctxinfo + skills.catalog_hint())
+              "mitgeteilt wird." + tools.deferred_catalog_hint() + skills.catalog_hint()
+              + _now_hint() + sat + ctxinfo)
     user_msg = autom["task"] + (("\n\n" + extra_user) if extra_user else "")
     working = [{"role": "system", "content": system}, {"role": "user", "content": user_msg}]
-    available = tools.TOOL_SCHEMAS + mcp_hub.tool_schemas()
+    # Kernliste wie im Chat (stabiler Prefix, geteilter KV-Cache); Rest per load_tools/MCP-Katalog.
+    available = tools.core_schemas()
     debug.log("automation_run", id=autom["id"], title=autom["title"], user=uid, session=sid,
               task=autom["task"][:200])
     r = await _run_loop(cfg, ctx, working, available, think=True)
@@ -1367,13 +1762,13 @@ async def _plugin_run_agent(task: str, user_id, allow_tools) -> str:
     """Voller Agenten-Tool-Loop im Auftrag eines Plugins (Rechte des handelnden Nutzers)."""
     cfg = config.get()
     ctx = _plugin_ctx(user_id)
-    system = cfg["system_prompt"] + _now_hint() + skills.catalog_hint() + mcp_hub.catalog_hint()
+    system = (cfg["system_prompt"] + tools.deferred_catalog_hint() + skills.catalog_hint()
+              + mcp_hub.catalog_hint() + _now_hint())
     working = [{"role": "system", "content": system}, {"role": "user", "content": task}]
-    available = list(tools.TOOL_SCHEMAS)
-    if allow_tools:
+    available = tools.core_schemas()
+    if allow_tools:                                 # Plugin-Scope: nur erlaubte Werkzeuge anbieten
         allow = set(allow_tools)
-        available = [s for s in available if s.get("function", {}).get("name") in allow]
-    available += mcp_hub.tool_schemas()
+        available = [s for s in tools.TOOL_SCHEMAS if s.get("function", {}).get("name") in allow]
     r = await _run_loop(cfg, ctx, working, available, think=True)
     return (r.get("content") or "").strip()
 
@@ -2194,6 +2589,17 @@ def admin_mcp_keywords(body: dict, jarvis_admin_token: str | None = Cookie(defau
     _admin(jarvis_admin_token)
     mcp_hub.set_keywords((body or {}).get("name", ""), (body or {}).get("keywords", ""))
     return {"ok": True, "servers": mcp_hub.list_servers(), "default_keywords": mcp_hub.DEFAULT_ACCEL_KEYWORDS}
+
+
+@app.post("/api/admin/mcp/keywords/harvest")
+async def admin_mcp_keywords_harvest(body: dict, jarvis_admin_token: str | None = Cookie(default=None)):
+    """Stichwörter automatisch aus den echten Gerätenamen des Servers befüllen (erweiterungen.md 6.1)."""
+    _admin(jarvis_admin_token)
+    name = (body or {}).get("name", "")
+    kws = await mcp_hub.harvest_keywords(name)
+    if not kws:
+        raise HTTPException(status_code=400, detail="Keine Geräte gefunden (hat der Server ein Geräte-Such-Tool?).")
+    return {"ok": True, "count": len(kws), "servers": mcp_hub.list_servers()}
 
 
 # ── Plugin-Verwaltung (Registry, API-Keys, Scopes) ───────────────────────────

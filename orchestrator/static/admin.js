@@ -61,7 +61,7 @@ document.querySelectorAll(".navbtn").forEach((b) => b.onclick = () => {
 
 // ── Verwaltung laden/rendern ────────────────────────────────────────────────
 const CFG_KEYS = ["llm_url", "llm_model", "vision_model", "llm_max_tokens", "llm_timeout", "llm_frequency_penalty",
-    "thinking_mode", "thinking_budget", "stt_url", "stt_model",
+    "thinking_mode", "thinking_budget", "reasoning_effort", "thinking_rounds", "stt_url", "stt_model",
     "stt_language", "tts_engine", "tts_voice_edge", "tts_voice_piper", "tts_voice_kokoro", "tts_url",
     "voice_id_threshold", "system_prompt", "sandbox_url", "sandbox_timeout_s"];
 const CFG_BOOLS = ["sandbox_enabled", "sandbox_allow_network", "fetch_allow_lan", "llm_cache_prompt"];
@@ -252,6 +252,7 @@ async function loadMcp() {
             <div class="row" style="margin-top:6px">
               <input class="kw-input" data-kw="${s.name}" value="${kwVal}" placeholder="${ph}" style="flex:1">
               <button class="small" data-savekw="${s.name}">⚡ Stichwörter</button>
+              <button class="small secondary" data-harvestkw="${s.name}" title="Stichwörter automatisch aus den echten Gerätenamen befüllen">⛏ aus Geräten</button>
               <button class="small secondary" data-defkw="${s.name}">↺ Standard</button>
             </div>
             <div class="muted" style="font-size:11px">Beschleunigungs-Stichwörter (Vorab-Geräteauflösung → schnellere Antworten).
@@ -269,6 +270,14 @@ async function loadMcp() {
     });
     el.querySelectorAll("[data-defkw]").forEach((b) => b.onclick = async () => {
         await api("POST", "/api/admin/mcp/keywords", { name: b.dataset.defkw, keywords: "" });
+        await loadMcp();
+    });
+    el.querySelectorAll("[data-harvestkw]").forEach((b) => b.onclick = async () => {
+        b.disabled = true; b.textContent = "⛏ sammle…";
+        try {
+            const r = await api("POST", "/api/admin/mcp/keywords/harvest", { name: b.dataset.harvestkw });
+            alert(`${r.count} Stichwörter aus den Gerätenamen übernommen.`);
+        } catch (e) { alert(e.message); }
         await loadMcp();
     });
 }

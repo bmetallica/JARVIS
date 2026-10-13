@@ -14,6 +14,7 @@ import io
 import json
 import re
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -80,11 +81,31 @@ def vision_call(prompt: str, image_url: str, cfg: dict, timeout: int = 150) -> s
 
 
 def _thinking_kwargs(cfg: dict, think: bool) -> dict:
-    """chat_template_kwargs für gemma4: Denken aus (schnell) oder an (mit Budget-Cap).
-    Wird pro Request gesetzt — Standard aus, nur für komplexe Flows an."""
-    if think:
-        return {"enable_thinking": True, "max_thinking_tokens": int(cfg.get("thinking_budget", 512))}
-    return {"enable_thinking": False}
+    """chat_template_kwargs: Denken aus (schnell) oder an — dann so KURZ wie möglich.
+    `reasoning_effort` (low|medium|xhigh) wird von Vorlagen wie Bonsai2 ausgewertet und ist
+    dort der einzige wirksame Hebel: ohne Angabe nimmt die Vorlage **xhigh** als Default
+    (gemessen: Antwortrunde 5,4 s statt 3,3 s bei low). `max_thinking_tokens` wirkt dagegen
+    nur bei Vorlagen, die es kennen (z.B. gemma4/qwen3) — beides mitsenden, unbekannte
+    Schlüssel ignoriert die Vorlage."""
+    if not think:
+        return {"enable_thinking": False}
+    kw: dict = {"enable_thinking": True, "max_thinking_tokens": int(cfg.get("thinking_budget", 512))}
+    eff = str(cfg.get("reasoning_effort") or "").strip().lower()
+    if eff in ("low", "medium", "xhigh"):
+        kw["reasoning_effort"] = eff
+    return kw
+
+
+def timing_info(t: dict | None) -> dict:
+    """Kurzfassung der llama.cpp-Timings für die Logs — trennt Prefill (Prompt lesen) von
+    Decode (Tokens schreiben). Ohne diese Trennung ist nicht zu sehen, ob eine langsame Runde
+    am großen Prompt oder am langen Denken/Antworten liegt."""
+    t = t or {}
+    out = {"pp_n": int(t.get("prompt_n") or 0), "pp_ms": int(t.get("prompt_ms") or 0),
+           "tg_n": int(t.get("predicted_n") or 0), "tg_ms": int(t.get("predicted_ms") or 0)}
+    if t.get("cache_n") is not None:
+        out["cached"] = int(t.get("cache_n") or 0)
+    return out
 
 
 def _post_llm(url: str, payload: dict, timeout: int, stream: bool = False):
@@ -185,9 +206,12 @@ def llm_call(messages: list[dict], cfg: dict, tools: list | None = None, think: 
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+
+        _apply_tool_sampling(payload, cfg)
     resp = _post_llm(f"{url}/v1/chat/completions", payload, timeout)
     resp.raise_for_status()
-    choice  = resp.json()["choices"][0]
+    body    = resp.json()
+    choice  = body["choices"][0]
     msg     = choice.get("message", {}) or {}
     content = (msg.get("content") or "").strip()
 
@@ -213,7 +237,8 @@ def llm_call(messages: list[dict], cfg: dict, tools: list | None = None, think: 
     raw = {"role": "assistant", "content": content}
     if raw_calls:
         raw["tool_calls"] = raw_calls
-    return {"content": content, "tool_calls": parsed, "raw": raw, "finish": choice.get("finish_reason")}
+    return {"content": content, "tool_calls": parsed, "raw": raw, "finish": choice.get("finish_reason"),
+            "timings": body.get("timings") or {}}
 
 
 _embed_model = None
@@ -265,8 +290,11 @@ def llm_stream(messages: list[dict], cfg: dict, tools: list | None = None, think
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
+        _apply_tool_sampling(payload, cfg)
+
     full, buf = "", ""
     tc_frag: dict = {}
+    _t0, ttfb_ms, timings = time.time(), 0, {}
     with _post_llm(f"{url}/v1/chat/completions", payload, timeout, stream=True) as resp:
         resp.raise_for_status()
         for raw in resp.iter_lines():
@@ -282,9 +310,13 @@ def llm_stream(messages: list[dict], cfg: dict, tools: list | None = None, think
                 chunk = json.loads(data)
             except Exception:
                 continue
+            if chunk.get("timings"):
+                timings = chunk["timings"]
             choice = (chunk.get("choices") or [{}])[0]
             delta  = choice.get("delta", {}) or {}
             text   = delta.get("content") or ""
+            if (text or delta.get("tool_calls")) and not ttfb_ms:
+                ttfb_ms = int((time.time() - _t0) * 1000)   # erstes Token beim Nutzer = gefühlte Wartezeit
             if text:
                 full += text
                 buf  += text
@@ -320,7 +352,8 @@ def llm_stream(messages: list[dict], cfg: dict, tools: list | None = None, think
     raw = {"role": "assistant", "content": full}
     if raw_calls:
         raw["tool_calls"] = raw_calls
-    yield {"type": "done", "content": full.strip(), "tool_calls": tool_calls, "raw": raw}
+    yield {"type": "done", "content": full.strip(), "tool_calls": tool_calls, "raw": raw,
+           "ttfb_ms": ttfb_ms, "timings": timings}
 
 
 def list_models(cfg: dict, timeout: int = 8) -> list[str]:

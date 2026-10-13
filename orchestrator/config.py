@@ -20,13 +20,48 @@ _DEFAULTS: dict = {
     "llm_max_tokens": 1024,
     "llm_timeout": 180,
     "llm_ctx": 40960,               # Kontextfenster des Agenten-Modells (qwen3-14b: 40960) — für das Token-Budget (#3)
-    "ctx_reserve_tokens": 8000,     # Reserve für Tool-Schemas + System-Overhead + Sicherheitsabstand
+    "ctx_reserve_tokens": 2500,     # Reserve für System-Overhead + Sicherheitsabstand. Die Tool-Schemas
+                                    # werden seit 2026-10-12 EXAKT mitgezählt (context_budget.fit
+                                    # extra_tokens) und brauchen hier keine Pauschale mehr.
+    # Ein einzelnes Werkzeug-Ergebnis hart kappen, bevor es in den Prompt geht: 12 000 Zeichen
+    # ≈ 4 000 Tokens ≈ 7 s Prefill. Höher nur mit entsprechend größerem llm_ctx — vorher stand
+    # hier 64 000 (≈ 21 000 Tokens) und sprengte das 16k-Fenster regelmäßig (HTTP 400).
+    "tool_result_max_chars": 12000,
+    "fetch_max_chars": 20000,       # Obergrenze dessen, was fetch_url überhaupt zurückgibt
+    "profile_update_every": 6,      # Nutzerprofil höchstens alle N Turns neu generieren
     "chars_per_token": 3.0,         # grobe Token-Schätzung (deutsch ~3 Zeichen/Token)
     "summary_max_chars": 1500,      # Obergrenze der rollierenden Gesprächs-Zusammenfassung
     "llm_frequency_penalty": 0.3,   # gegen Wiederholungs-/Tool-Schleifen (0 = aus, 0.2–0.6 sinnvoll)
+    # Embedding-Router (11.3): blendet nur passende Tool-Gruppen ein. Standard AUS — er wechselt die
+    # Tool-Liste pro Thema, und die wird VOR den System-Text gerendert: der KV-Prefix-Cache des ganzen
+    # Prompts ist damit jedes Mal hinüber (gemessen 16–24 s Prefill statt 0,4 s). Statt dessen: kleine,
+    # stabile Kernliste (tools.CORE_TOOLS) + Nachladen per load_tools.
+    "tool_router_enabled": False,
+    "tool_router_threshold": 0.45,  # Mindest-Ähnlichkeit; darunter → volle Tool-Liste (konservativ)
+    "llm_tool_temperature": 0.2,    # Temperatur NUR für Runden mit Tool-Angebot (stabilere Tool-Wahl;
+                                    # -1 = Server-Default auch dort)
     "llm_cache_prompt": True,       # llama.cpp KV-Cache des stabilen Präfix (System-Prompt) wiederverwenden
+    "llm_keepalive_s": 0,           # >0: Agenten-Modell alle N s warmhalten (1-Token-Ping), nur bei jüngster
+                                    # Aktivität (<10 min) — verhindert llama-swap-Kaltstarts (502). 0 = aus,
+                                    # damit andere Apps (z.B. Coding-Modell) ungestört swappen können.
+    "smarthome_fast_confirm": True,  # Schalt-Bestätigung deterministisch statt extra LLM-Runde (~5 s schneller)
+    # Eindeutige Messwert-Fragen („Wie ist der Stromverbrauch?", „Wie warm ist es im Wohnzimmer?")
+    # direkt aus dem vorab aufgelösten Gerätewert beantworten, ohne LLM-Runde: Antwort in ~0,2 s
+    # statt 3–150 s (je GPU-Last). Greift nur, wenn das beste Gerät frisch ist, die gefragte Größe
+    # liefert und ein Wort des Nutzers im Namen trägt — sonst normal über das Modell.
+    "smarthome_fast_read": True,
+    "preresolve_agenda": True,       # Kalender-/Todo-Fragen: heutige Termine + offene To-dos vorab in den Prompt
     "thinking_mode": "adaptive",  # adaptive = erst ohne Denken, bei Fehlschlag mit | auto | always | never
-    "thinking_budget": 512,
+    "thinking_budget": 512,         # Denk-Token-Deckel — wirkt NUR bei Vorlagen, die max_thinking_tokens
+                                    # kennen (gemma4/qwen3). Bonsai2 & Co. ignorieren ihn → reasoning_effort
+    "reasoning_effort": "low",      # low | medium | xhigh — Länge des Denkens bei Vorlagen mit
+                                    # reasoning_effort. Ohne Angabe nehmen diese Vorlagen xhigh (!).
+    # In so vielen Runden pro Turn darf gedacht werden. 0 = ALLE Runden (empfohlen!): Vorlagen wie
+    # Bonsai2 schreiben den Reasoning-Hinweis GANZ VORNE in den Prompt — jedes Umschalten zwischen
+    # „mit/ohne Denken" ändert damit Zeichen 19 und entwertet den gesamten KV-Prefix-Cache inkl.
+    # Tool-Block (gemessen: +13 s pro Umschaltung). Ein Limit lohnt nur bei Vorlagen, die den
+    # Denk-Schalter erst am Prompt-ENDE abbilden (gemma4/qwen3).
+    "thinking_rounds": 0,
     "debug_enabled": False,
     "log_retention_days": 14,       # persistente JSONL-Logs nach N Tagen löschen (#1; 0 = nie)
     "history_retention_days": 90,   # chat_history: Zeilen älter als N Tage löschen (Housekeeping; 0 = nie)

@@ -36,13 +36,18 @@ def _msg_tokens(msg: dict, cfg: dict) -> int:
     return estimate_tokens(str(msg.get("content") or ""), cfg) + 4   # +4 Rollen-/Format-Overhead
 
 
-def fit(sid: str, system_text: str, history: list[dict], user_msg: str, cfg: dict):
+def fit(sid: str, system_text: str, history: list[dict], user_msg: str, cfg: dict,
+        extra_tokens: int = 0):
     """Trimmt `history` so, dass System + Verlauf + Frage ins Kontextfenster passen.
     Getrimmte (älteste) Turns wandern in die rollierende Zusammenfassung der Session.
+    `extra_tokens` = Prompt-Anteile außerhalb der Nachrichten (vor allem die Tool-Schemas,
+    die llama.cpp VOR den System-Text rendert) — ohne sie plante das Budget bisher um
+    Faktor ~3 zu optimistisch und der Server lehnte mit exceed_context_size ab.
     Gibt den behaltenen (jüngsten) Verlauf zurück."""
     n_ctx = int(cfg.get("llm_ctx", 32768))
     reserve = int(cfg.get("llm_max_tokens", 1024)) + int(cfg.get("ctx_reserve_tokens", _DEFAULT_RESERVE_TOKENS))
-    budget = n_ctx - reserve - estimate_tokens(system_text, cfg) - estimate_tokens(user_msg, cfg)
+    budget = n_ctx - reserve - int(extra_tokens or 0) \
+        - estimate_tokens(system_text, cfg) - estimate_tokens(user_msg, cfg)
     if budget < 512:
         budget = 512   # absolute Untergrenze, sonst gäbe es gar keinen Verlauf
 

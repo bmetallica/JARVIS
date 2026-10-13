@@ -952,7 +952,108 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_tools",
+            "description": "Lädt nicht eingeblendete Werkzeuge aus dem Katalog „WEITERE WERKZEUGE\" nach, "
+                           "damit du sie danach direkt aufrufen kannst. Erst laden, dann aufrufen.",
+            "parameters": {
+                "type": "object",
+                "properties": {"names": {"type": "array", "items": {"type": "string"},
+                                         "description": "Werkzeugnamen aus dem Katalog, mehrere auf einmal."}},
+                "required": ["names"],
+            },
+        },
+    },
 ]
+
+
+# ── Kern-Werkzeuge vs. Nachladen (Prefill-/Cache-Budget, roadmap 2026-10-12) ──
+# Im gerenderten Prompt steht der Tool-Block VOR dem System-Text. Alle Schemas zusammen sind
+# ~9 300 Tokens — bei ~550 Tok/s Prefill allein 16 s pro Anfrage — UND jede Änderung der Liste
+# entwertet den KV-Prefix-Cache des GANZEN Prompts (Messung: gleiche Liste → Turn 0,9 s statt
+# 17 s). Darum: eine kleine, IMMER GLEICHE Kernliste einblenden, alles Übrige nur als
+# Namens-Katalog im stabilen Prompt-Präfix und auf Zuruf per load_tools nachladen.
+CORE_TOOLS = (
+    "weather", "set_timer", "list_timers", "cancel_timer",
+    "list_events", "add_event",
+    "list_todos", "add_todo", "complete_todo",
+    "save_note", "search_notes",
+    "web_search", "research", "fetch_url",
+    "save_memory", "knowledge_search", "recall_conversation",
+    "send_message", "analyze_image",
+    "load_tools", "load_skills", "search_skills", "load_mcp_tools", "search_mcp_tools",
+)
+
+# Nachlade-Katalog: nur Gruppen + Namen (selbsterklärend) → ~350 statt ~6 000 Tokens.
+DEFERRED_GROUPS: dict[str, list[str]] = {
+    "Automatisierungen": ["create_automation", "update_automation", "cancel_automation",
+                          "list_automations", "create_watch_automation"],
+    "Skills (eigene Werkzeuge bauen)": ["create_skill", "update_skill", "repair_skill", "run_skill",
+                                        "describe_skill", "delete_skill"],
+    "Code/Dateien": ["run_python", "run_shell", "read_workspace_file", "list_workspace_files"],
+    "Browser-Steuerung": ["browse", "browser_click", "browser_type", "browser_screenshot"],
+    "Kalender ändern/teilen": ["update_event", "delete_event", "share_calendar", "unshare_calendar",
+                               "subscribe_calendar", "unsubscribe_calendar",
+                               "list_calendar_subscriptions", "calendar_subscription"],
+    "To-dos weiteres": ["remove_todo", "todo_link"],
+    "Geräte/Clients": ["client_action", "client_screenshot", "list_client_capabilities", "list_clients",
+                       "set_device_volume"],
+    "Nutzer/Stimme": ["create_user", "link_voice_to_existing_user", "remember_my_voice"],
+    "Bilder/Subagent": ["send_image", "spawn_subagent"],
+}
+
+# Entwicklungs-Aufgaben brauchen fast immer diese Gruppen → bei Dev-Anfragen vorab laden,
+# statt eine Extra-Runde fürs Nachladen zu drehen (die Liste bleibt innerhalb der Session stabil).
+DEV_PRELOAD_GROUPS = ("Skills (eigene Werkzeuge bauen)", "Code/Dateien", "Browser-Steuerung")
+
+
+def _schema_by_name(name: str) -> dict | None:
+    for s in TOOL_SCHEMAS:
+        if (s.get("function") or {}).get("name") == name:
+            return s
+    return None
+
+
+def core_schemas() -> list[dict]:
+    """Die dauerhaft eingeblendeten Kern-Werkzeuge — Reihenfolge STABIL (Prefix-Cache!)."""
+    return [s for s in TOOL_SCHEMAS if (s.get("function") or {}).get("name") in CORE_TOOLS]
+
+
+def schemas_for(names) -> list[dict]:
+    """Schemas der per load_tools nachgeladenen Werkzeuge (stabile Reihenfolge, Kern nicht doppelt)."""
+    want = {str(n).strip() for n in (names or [])}
+    return [s for s in TOOL_SCHEMAS
+            if (s.get("function") or {}).get("name") in want
+            and (s.get("function") or {}).get("name") not in CORE_TOOLS]
+
+
+def preload_names(groups) -> list[str]:
+    """Alle Werkzeugnamen der genannten Katalog-Gruppen (für Vorab-Laden)."""
+    out = []
+    for g in groups or ():
+        out += [n for n in DEFERRED_GROUPS.get(g, []) if n not in CORE_TOOLS and _schema_by_name(n)]
+    return out
+
+
+def deferred_catalog_hint() -> str:
+    """Katalog der nicht eingeblendeten Werkzeuge für den STABILEN Prompt-Präfix."""
+    groups = {g: [n for n in ns if n not in CORE_TOOLS and _schema_by_name(n)]
+              for g, ns in DEFERRED_GROUPS.items()}
+    listed = {n for ns in groups.values() for n in ns}
+    rest = [n for n in ((s.get("function") or {}).get("name", "") for s in TOOL_SCHEMAS)
+            if n and n not in CORE_TOOLS and n not in listed]
+    if rest:
+        groups["Weitere"] = rest
+    lines = [f"- {g}: {', '.join(ns)}" for g, ns in groups.items() if ns]
+    if not lines:
+        return ""
+    return ("\n\nWEITERE WERKZEUGE (nicht eingeblendet — nur die Namen stehen hier): Brauchst du eines, "
+            "lade es ZUERST mit `load_tools([\"name\", …])` (mehrere in EINEM Aufruf) und rufe es danach "
+            "normal auf. Für Alltagsfragen reichen die eingeblendeten Werkzeuge — lade nur, was die Aufgabe "
+            "wirklich braucht. Externe Geräte-/Smart-Home-Werkzeuge gehen weiterhin über load_mcp_tools.\n"
+            + "\n".join(lines))
 
 
 # Werkzeuge, die für Entwicklung/Bau stehen → schalten den „Dev-Modus" der Session an (erzwingt Denken).
@@ -962,7 +1063,7 @@ _DEV_TOOLS = {"create_skill", "update_skill", "delete_skill", "repair_skill", "r
 
 # Tools, deren Ergebnis NICHT ins Tool-Gedächtnis soll (Steuer-/Timer-/Geschwätz-Tools).
 _MEMORY_SKIP_TOOLS = {"set_timer", "list_timers", "cancel_timer", "describe_skill",
-                      "load_skills", "load_mcp_tools", "send_message"}
+                      "load_skills", "load_mcp_tools", "load_tools", "send_message"}
 
 # Fehler-Präfixe der Tool-Ergebnisse (deutsch) → für „ist der Aufruf geglückt?" (Verify-by-Tool #10).
 _FAIL_PREFIXES = ("fehler", "[fehler]", "berechtigung verweigert", "autonom gesperrt", "kein ", "keine ",
@@ -1399,6 +1500,34 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
             return ("Keine dieser MCP-Werkzeuge gefunden. Mit search_mcp_tools die korrekten "
                     "Namen mcp__<server>__<tool> ermitteln.")
         return "Geladen — jetzt direkt aufrufbar: " + ", ".join(found)
+
+    if name == "load_tools":
+        loaded = ctx.setdefault("loaded_tools", set())
+        if not isinstance(loaded, set):
+            loaded = set(loaded); ctx["loaded_tools"] = loaded
+        found, already, unknown = [], [], []
+        for n in args.get("names") or []:
+            n = str(n).strip()
+            if not n:
+                continue
+            if n in CORE_TOOLS:
+                already.append(n)                     # steht schon zur Verfügung
+            elif _schema_by_name(n):
+                loaded.add(n); found.append(n)
+            else:
+                unknown.append(n)
+        if not found and not already:
+            return ("Keine dieser Werkzeuge gefunden" + (f" ({', '.join(unknown)})" if unknown else "")
+                    + ". Die Namen stehen im Katalog „WEITERE WERKZEUGE\" im Prompt; externe Geräte-Werkzeuge "
+                      "lädst du mit load_mcp_tools.")
+        parts = []
+        if found:
+            parts.append("Geladen — jetzt direkt aufrufbar: " + ", ".join(found))
+        if already:
+            parts.append("Schon eingeblendet (einfach aufrufen): " + ", ".join(already))
+        if unknown:
+            parts.append("Unbekannt: " + ", ".join(unknown))
+        return " ".join(parts)
 
     if name == "describe_skill":
         s = skills.get(args.get("name") or "")
