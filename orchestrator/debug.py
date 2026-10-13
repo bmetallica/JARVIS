@@ -34,6 +34,9 @@ _PERSIST_KINDS = {"turn", "turn_done", "llm", "llm_error", "retry", "tool", "too
                   "mcp_startup", "mcp_refresh", "mcp_refresh_error", "startup_error", "smarthome_hint",
                   "fast_confirm", "housekeeping", "keepalive_error",
                   "telegram_photo_in", "vision_prepass", "vision_error",
+                  "telegram_document_in", "document_read", "document_error",
+                  "document_ocr_error", "mcp_attachment", "mcp_headers_set",
+                  "forward", "forward_error", "forward_rules_set",
                   "event_fire", "event_fire_denied", "event_token_rotated"}
 
 # Felder, die Nutzer-Inhalte enthalten — bei aktivem log_redact aus den JSONL-Logs entfernt

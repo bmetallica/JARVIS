@@ -35,6 +35,7 @@ class SessionHub:
         self._cancel: dict = {}      # session_id -> True, wenn laufender Turn abgebrochen werden soll (Barge-in)
         self._authed: dict = {}      # session_id -> identity (explizite Passwort-Anmeldung, Vorrang vor Stimme)
         self._image: dict = {}       # session_id -> {uri, ts}  (zuletzt gesendetes Bild → Rückfragen)
+        self._doc: dict = {}         # session_id -> {uri, name, pages, ts}  (zuletzt gesendetes PDF)
 
     def mark_dev(self, session_id: str | None) -> None:
         """Session ist in einem Entwicklungs-/Bau-Flow (Skill/Code/Browser-Automation)."""
@@ -114,6 +115,7 @@ class SessionHub:
         self._summary.pop(session_id, None)
         self._last_tools.pop(session_id, None)
         self._image.pop(session_id, None)
+        self._doc.pop(session_id, None)
         try:
             import store
             store.history_reset(session_id)
@@ -142,6 +144,31 @@ class SessionHub:
 
     def get_last_image(self, session_id: str | None) -> str:
         return (self._image.get(session_id) or {}).get("uri", "") if session_id else ""
+
+    # ── Zuletzt gesendetes Dokument (PDF) für Rückfragen und Nachladen ────────
+    # Analog zum Bild, aber mit kleinerem Limit: ein PDF darf 20 MB haben (Telegram-Grenze),
+    # 20 davon im RAM wären 400 MB.
+    def set_last_document(self, session_id: str, doc: dict, limit: int = 5) -> None:
+        """Merkt das zuletzt an diese Session geschickte Dokument:
+        {name, mime, data_uri, text, pages}. Damit können Folgefragen weitere Seiten nachladen
+        (read_document) und MCP-Werkzeuge das Original bekommen (datei="session")."""
+        if not session_id or not (doc or {}).get("data_uri"):
+            return
+        self._doc[session_id] = {
+            "name": (doc.get("name") or "dokument.pdf"),
+            "mime": (doc.get("mime") or "application/pdf"),
+            "data_uri": doc["data_uri"],
+            "text": doc.get("text") or "",
+            "pages": int(doc.get("pages") or 0),
+            "ts": time.time(),
+        }
+        while len(self._doc) > limit:                      # Speicher begrenzen: älteste zuerst
+            oldest = min(self._doc, key=lambda k: self._doc[k]["ts"])
+            self._doc.pop(oldest, None)
+
+    def get_last_document(self, session_id: str | None) -> dict:
+        """{} wenn in dieser Session kein Dokument gesendet wurde."""
+        return dict(self._doc.get(session_id) or {}) if session_id else {}
 
     # ── Barge-in: laufenden Turn abbrechen ────────────────────────────────────
     def request_cancel(self, session_id: str) -> None:
@@ -192,7 +219,7 @@ class SessionHub:
         now = time.time()
         state_dicts = [self._meta, self._pending, self._identity, self._history, self._last_uid,
                        self._last_voice, self._onboard, self._seen, self._dev, self._last_tools,
-                       self._summary, self._cancel, self._authed]
+                       self._summary, self._cancel, self._authed, self._image, self._doc]
         all_sids = set().union(*(d.keys() for d in state_dicts)) | set(self._loaded_hist)
         if not hasattr(self, "_prune_seen"):
             self._prune_seen = {}

@@ -9,6 +9,7 @@ edge-tts>=7.2
 piper-tts>=1.4
 ddgs>=9.14
 pypdf>=6.13
+pypdfium2>=5.14          # PDF-Text + Seiten-Rendering (documents.py); Apache/BSD statt AGPL
 psycopg>=3.3            # Postgres/pgvector (store.py, auth.py, plugins_registry.py)
 fastembed>=0.8          # lokale Embeddings nomic-embed-text (services.py)
 mcp>=1.28               # MCP-Client Streamable HTTP (mcp_hub.py)

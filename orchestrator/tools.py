@@ -22,6 +22,7 @@ import biometrics
 import calendars
 import config
 import debug
+import documents
 import knowledge
 import mcp_hub
 import messaging
@@ -955,6 +956,35 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_document",
+            "description": "Liest weitere Seiten des PDFs, das der Nutzer in dieser Unterhaltung "
+                           "geschickt hat. Nutze dies, wenn der Auszug im Prompt nicht reicht — "
+                           "etwa bei „Was steht auf Seite 3?\" oder „Fasse das ganze Dokument "
+                           "zusammen\". Gescannte Seiten werden dabei automatisch per Bilderkennung "
+                           "gelesen (das dauert pro Seite einige Sekunden).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seite_von": {"type": "integer", "description": "Erste zu lesende Seite (1 = die erste)."},
+                    "seite_bis": {"type": "integer", "description": "Letzte zu lesende Seite (einschließlich)."},
+                },
+                "required": ["seite_von"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "document_to_knowledge",
+            "description": "Legt das in dieser Unterhaltung geschickte PDF dauerhaft in der "
+                           "Wissensbasis ab (durchsuchbar per knowledge_search). Nutze dies bei "
+                           "„merk dir das PDF\" oder „nimm das Dokument in die Wissensbasis auf\".",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "load_tools",
             "description": "Lädt nicht eingeblendete Werkzeuge aus dem Katalog „WEITERE WERKZEUGE\" nach, "
                            "damit du sie danach direkt aufrufen kannst. Erst laden, dann aufrufen.",
@@ -1002,6 +1032,7 @@ DEFERRED_GROUPS: dict[str, list[str]] = {
                        "set_device_volume"],
     "Nutzer/Stimme": ["create_user", "link_voice_to_existing_user", "remember_my_voice"],
     "Bilder/Subagent": ["send_image", "spawn_subagent"],
+    "Dokumente/PDF": ["read_document", "document_to_knowledge"],
 }
 
 # Entwicklungs-Aufgaben brauchen fast immer diese Gruppen → bei Dev-Anfragen vorab laden,
@@ -1921,6 +1952,59 @@ async def _execute_tool_impl(name: str, args: dict, ctx: dict) -> str:
                                            (args.get("question") or "").strip(), image_url, ctx["cfg"])
         except Exception as e:
             return f"Bildanalyse fehlgeschlagen: {e}"
+
+    if name == "read_document":
+        doc = hub.get_last_document(sid)
+        if not doc or not doc.get("data_uri"):
+            return "In dieser Unterhaltung wurde kein Dokument gesendet."
+        try:
+            raw = base64.b64decode(doc["data_uri"].split(",", 1)[1])
+        except Exception:
+            return "Das gemerkte Dokument ist nicht mehr lesbar — bitte erneut schicken."
+        try:
+            frm = int(args.get("seite_von") or 1)
+        except (TypeError, ValueError):
+            frm = 1
+        to_raw = args.get("seite_bis")
+        try:
+            to = int(to_raw) if to_raw not in (None, "") else frm
+        except (TypeError, ValueError):
+            to = frm
+        cfg = ctx.get("cfg") or config.get()
+        res = await asyncio.to_thread(documents.extract_pdf, raw, cfg, max(1, frm), max(frm, to))
+        if res.get("error"):
+            return res["error"]
+        text = res.get("text") or ""
+        if not text.strip():
+            return (f"Auf den Seiten {res['read_from']}–{res['read_to']} von „{doc['name']}“ "
+                    "steht kein lesbarer Text.")
+        head = (f"„{doc['name']}“, Seiten {res['read_from']}–{res['read_to']} von {res['pages']}"
+                + (f" (davon per Bilderkennung gelesen: {', '.join(map(str, res['ocr_pages']))})"
+                   if res.get("ocr_pages") else "") + ":\n")
+        return head + text
+
+    if name == "document_to_knowledge":
+        doc = hub.get_last_document(sid)
+        if not doc or not doc.get("data_uri"):
+            return "In dieser Unterhaltung wurde kein Dokument gesendet."
+        text = (doc.get("text") or "").strip()
+        if not text:                               # noch nicht gelesen → jetzt lesen
+            try:
+                raw = base64.b64decode(doc["data_uri"].split(",", 1)[1])
+            except Exception:
+                return "Das gemerkte Dokument ist nicht mehr lesbar — bitte erneut schicken."
+            res = await asyncio.to_thread(documents.extract_pdf, raw, ctx.get("cfg") or config.get())
+            if res.get("error"):
+                return res["error"]
+            text = res.get("text") or ""
+        if not text.strip():
+            return f"In „{doc['name']}“ ist kein lesbarer Text — nichts zum Aufnehmen."
+        try:
+            n = await asyncio.to_thread(knowledge.ingest_document, ctx.get("cfg") or config.get(),
+                                        doc["name"], text, ns)
+        except Exception as e:
+            return f"Aufnahme in die Wissensbasis fehlgeschlagen: {e}"
+        return f"„{doc['name']}“ ist in der Wissensbasis — {n} Abschnitte, durchsuchbar per knowledge_search."
 
     if name == "knowledge_search":
         query = (args.get("query") or "").strip()

@@ -28,6 +28,21 @@ _DEFAULTS: dict = {
     # hier 64 000 (≈ 21 000 Tokens) und sprengte das 16k-Fenster regelmäßig (HTTP 400).
     "tool_result_max_chars": 12000,
     "fetch_max_chars": 20000,       # Obergrenze dessen, was fetch_url überhaupt zurückgibt
+    # ── PDF-Dokumente (documents.py) ──────────────────────────────────────────
+    # Seiten, die überhaupt gelesen werden. Reiner Text ist billig, die Grenze schützt vor
+    # 300-Seiten-Handbüchern, die das Kontextfenster und den Prefill sprengen.
+    "pdf_max_pages": 40,
+    # Scan-Seiten (kaum eingebetteter Text) werden als Bild gerendert und vom Vision-Modell
+    # gelesen — JEDE kostet einen vollen Vision-Aufruf (~5-15 s). Darum eng begrenzt.
+    "pdf_ocr_max_pages": 8,
+    "pdf_scan_min_chars": 40,       # weniger Textzeichen auf einer Seite → als Scan behandeln
+    "pdf_render_scale": 2.08,       # Render-Maßstab für Scan-Seiten (2.08 ≈ 150 dpi)
+    # So viel Dokumenttext kommt direkt ins Gespräch (ans PROMPT-ENDE, damit der Prefix-Cache
+    # hält). Längere PDFs kommen auszugsweise hinein, den Rest holt das Modell per read_document.
+    "pdf_inline_chars": 12000,
+    # Scan-Seiten beim ERSTEN Lesen eines PDFs im Gespräch (Antwortzeit!). read_document
+    # darf später das volle Budget pdf_ocr_max_pages nutzen.
+    "pdf_inline_ocr_pages": 2,
     "profile_update_every": 6,      # Nutzerprofil höchstens alle N Turns neu generieren
     "chars_per_token": 3.0,         # grobe Token-Schätzung (deutsch ~3 Zeichen/Token)
     "summary_max_chars": 1500,      # Obergrenze der rollierenden Gesprächs-Zusammenfassung

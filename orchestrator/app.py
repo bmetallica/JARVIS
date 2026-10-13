@@ -37,6 +37,7 @@ import auth
 import biometrics
 import mcp_hub
 import debug
+import documents
 import automations
 import watchers
 import skills
@@ -70,6 +71,8 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = []
     session_id: str | None = None
     image: str | None = None          # optionales Bild zum Turn (data:-URI oder http(s)-URL)
+    # Optionales Dokument zum Turn: {"name", "mime", "data_uri"} (phase1.md Baustein 1)
+    document: dict | None = None
 
 
 class TTSRequest(BaseModel):
@@ -81,6 +84,16 @@ class TTSRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"orchestrator": "ok", "services": services.health(config.get())}
+
+
+def _user_history_text(req) -> str:
+    """Verlaufszeile des Nutzer-Turns — mit Marke, wenn ein Anhang dabei war, damit
+    Rückfragen („was stand da nochmal?") den Zusammenhang behalten."""
+    tag = "[Bild gesendet] " if getattr(req, "image", None) else ""
+    doc = getattr(req, "document", None) or {}
+    if doc:
+        tag = f"[PDF gesendet: {doc.get('name') or 'dokument.pdf'}] "
+    return (tag + (req.message or "")).strip()
 
 
 # Config-Schlüssel, die NIE im Klartext ans UI gehen (erweiterungen.md 3.2).
@@ -782,6 +795,54 @@ async def _prepare_turn(req: ChatRequest):
                    "du hättest kein Bild bekommen. Findest du das Gesuchte nicht auf dem Bild, sage ehrlich, "
                    "was stattdessen darauf zu sehen ist.")
 
+    # ── Dokument zu dieser Nachricht (Telegram-PDF, Upload): EINMAL lesen ──
+    # Wie beim Bild landet der Inhalt am ENDE des Prompts: der stabile Anfang (und damit der
+    # KV-Prefix-Cache) bleibt erhalten. Lange PDFs kommen nur auszugsweise hinein, den Rest
+    # holt das Modell per read_document — ein Nachlade-Werkzeug, kein Kern-Tool.
+    if req.document:
+        _doc = req.document or {}
+        _uri = str(_doc.get("data_uri") or "").strip()
+        _name = str(_doc.get("name") or "dokument.pdf")
+        _raw = b""
+        if _uri.startswith("data:") and "," in _uri:
+            try:
+                _raw = base64.b64decode(_uri.split(",", 1)[1])
+            except Exception:
+                _raw = b""
+        if not _raw:
+            system += (f"\n\nDOKUMENT: Der Nutzer hat „{_name}“ geschickt, die Datei ist aber nicht "
+                       "lesbar angekommen. Sag ihm das und bitte ihn, sie erneut zu schicken.")
+        else:
+            # Beim ERSTEN Lesen ein kleines Scan-Budget: jede Scan-Seite kostet einen Vision-Aufruf.
+            # read_document darf später das vollständige Budget (pdf_ocr_max_pages) nutzen.
+            _res = await asyncio.to_thread(documents.extract_pdf, _raw, cfg, 1, None, True,
+                                           int(cfg.get("pdf_inline_ocr_pages", 2) or 0))
+            if _res.get("error"):
+                system += f"\n\nDOKUMENT „{_name}“: {_res['error']} Sag dem Nutzer genau das."
+                debug.log("document_error", session=sid, file=_name, error=_res["error"][:200])
+            else:
+                hub.set_last_document(sid, {"name": _name, "mime": _doc.get("mime") or "application/pdf",
+                                            "data_uri": _uri, "text": _res.get("text") or "",
+                                            "pages": _res.get("pages") or 0})
+                ctx["document"] = {"name": _name, "pages": _res.get("pages") or 0}
+                _text, _cut = documents.excerpt(_res, int(cfg.get("pdf_inline_chars", 12000) or 12000))
+                _title = f" („{_res['title']}“)" if _res.get("title") else ""
+                system += (f"\n\nDOKUMENT: Der Nutzer hat das PDF „{_name}“{_title} mit "
+                           f"{_res['pages']} Seiten geschickt — es liegt dir bereits vor. Inhalt:\n"
+                           f"\"\"\"\n{_text}\n\"\"\"\n")
+                if _res.get("ocr_pages"):
+                    system += ("Gescannte Seiten wurden per Bilderkennung gelesen "
+                               f"({', '.join(str(x) for x in _res['ocr_pages'])}) — dort können "
+                               "Lesefehler stecken.\n")
+                if _cut:
+                    system += (f"Das ist nur ein AUSZUG (Seite {_res['read_from']} bis "
+                               f"{_res['read_to']} von {_res['pages']}, gekürzt). Brauchst du mehr, "
+                               "lade read_document nach (load_tools) und rufe es mit seite_von/"
+                               "seite_bis auf.\n")
+                system += ("Erledige damit die Aufgabe des Nutzers zum Dokument (Werkzeuge sind erlaubt). "
+                           "VERBOTEN: ihn auffordern, das PDF (nochmal) zu schicken, oder zu behaupten, "
+                           "du hättest keines bekommen.")
+
     try:
         mems = await asyncio.to_thread(knowledge.recall_memory, cfg, req.message, namespace)
         if mems:
@@ -1191,7 +1252,7 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
         return onboarding_q, identity
     if ctx.get("fast_read"):                  # Messwert steht schon fest → keine LLM-Runde (4.2)
         answer = ctx["fast_read"]
-        hub.append_history(sid, "user", req.message)
+        hub.append_history(sid, "user", _user_history_text(req))
         hub.append_history(sid, "assistant", answer)
         _index_conversation_bg(ctx, answer)   # für späteres Erinnern; Profil-Lauf bewusst nicht
         debug.log("turn_done", channel=channel, fast_read=True, ms=0, reply=answer[:120])
@@ -1214,7 +1275,7 @@ async def _run_chat(req: ChatRequest, channel: str = "chat") -> tuple[str, dict 
         if r2.get("content"):
             r = r2
     content = r["content"] or "Entschuldige, das hat nicht geklappt — bitte versuche es nochmal."
-    hub.append_history(sid, "user", f"[Bild gesendet] {req.message}".strip() if req.image else req.message)
+    hub.append_history(sid, "user", _user_history_text(req))
     hub.append_history(sid, "assistant", content)
     _finalize_turn(ctx, sid, content)
     debug.log("turn_done", channel=channel, ms=int((time.time() - t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
@@ -1378,7 +1439,7 @@ async def chat_stream(req: ChatRequest):
         if ctx.get("fast_read"):              # Messwert steht schon fest → keine LLM-Runde (4.2)
             answer = ctx["fast_read"]
             yield _sse("sentence", {"text": answer})
-            hub.append_history(sid, "user", req.message)
+            hub.append_history(sid, "user", _user_history_text(req))
             hub.append_history(sid, "assistant", answer)
             _index_conversation_bg(ctx, answer)
             debug.log("turn_done", channel="stream", fast_read=True,
@@ -1415,7 +1476,7 @@ async def chat_stream(req: ChatRequest):
                 for s in _split_sentences(r["content"]):
                     yield _sse("sentence", {"text": s})
                 final = r["content"]
-                hub.append_history(sid, "user", req.message)
+                hub.append_history(sid, "user", _user_history_text(req))
                 hub.append_history(sid, "assistant", final)
                 _finalize_turn(ctx, sid, final)
                 debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
@@ -1439,7 +1500,7 @@ async def chat_stream(req: ChatRequest):
                 debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
                           cancelled=True, reply=final[:120])
                 if final:                     # bereits Gesagtes festhalten, damit der Verlauf stimmt
-                    hub.append_history(sid, "user", req.message)
+                    hub.append_history(sid, "user", _user_history_text(req))
                     hub.append_history(sid, "assistant", final)
                 yield _sse("cancelled", {"content": final})
                 return
@@ -1451,7 +1512,7 @@ async def chat_stream(req: ChatRequest):
                     msg = ("Das war zu viel auf einmal fürs Kontextfenster (z.B. eine sehr große Datei). "
                            "Frag bitte gezielter nach einem Ausschnitt.")
                 yield _sse("sentence", {"text": msg})
-                hub.append_history(sid, "user", req.message)
+                hub.append_history(sid, "user", _user_history_text(req))
                 hub.append_history(sid, "assistant", msg)
                 debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
                           retried=(mode == "adaptive"), error=True, reply=msg)
@@ -1459,7 +1520,7 @@ async def chat_stream(req: ChatRequest):
                 return
             elif kind == "final":
                 final = data
-        hub.append_history(sid, "user", req.message)
+        hub.append_history(sid, "user", _user_history_text(req))
         hub.append_history(sid, "assistant", final)
         _finalize_turn(ctx, sid, final)
         debug.log("turn_done", channel="stream", ms=int((time.time() - _t0) * 1000), prompt_tokens=ctx.get("prompt_est_tokens"),
@@ -2109,6 +2170,9 @@ async def _calendar_sync_poller() -> None:
 # Bitte um gesprochene Antwort (Telegram-Sprachnachricht).
 _TG_VOICE_RE = re.compile(r"(sprachnachricht|als sprache|gesprochen|münd|vorlesen|antworte.*sprach)", re.IGNORECASE)
 _TG_MAX_IMAGE_BYTES = 12_000_000        # Obergrenze für eingehende Telegram-Bilder
+_TG_MAX_DOC_BYTES = 20_000_000          # Grenze der Telegram-Bot-API für Downloads
+
+
 
 
 def _tts_ogg(text: str, cfg: dict) -> bytes | None:
@@ -2228,6 +2292,51 @@ async def _handle_telegram_photo(chat_id, m: dict, sender: str = "") -> None:
     await _telegram_reply(chat_id, reply, bool(_TG_VOICE_RE.search(caption)))
 
 
+async def _handle_telegram_document(chat_id, m: dict, sender: str = "") -> None:
+    """Eingehendes Telegram-DOKUMENT (PDF): herunterladen → lesen → an den Agenten-Turn hängen.
+    Die Bildunterschrift ist die AUFGABE („Fasse das zusammen", „Was kostet das?"); ohne
+    Unterschrift wird gefragt, worum es geht.
+    Sicherheit wie bei Text: unverifizierte Chats werden nur als „ausstehend" protokolliert."""
+    doc = m.get("document") or {}
+    caption = (m.get("caption") or "").strip()
+    fname = doc.get("file_name") or "dokument.pdf"
+    if not await asyncio.to_thread(messaging.is_verified, chat_id):
+        messaging.add_pending(chat_id, sender, f"[PDF {fname}] {caption}".strip())
+        debug.log("telegram_blocked", chat=chat_id, sender=sender, message=f"[PDF {fname}]")
+        return
+    size = int(doc.get("file_size") or 0)
+    if size > _TG_MAX_DOC_BYTES:                 # vor dem Download abfangen, wenn Telegram es verrät
+        await asyncio.to_thread(messaging.send_to_chat, chat_id,
+                                "Das PDF ist zu groß (max. 20 MB) — das ist die Grenze der "
+                                "Telegram-Schnittstelle. Bitte kleiner oder in Teilen schicken.")
+        return
+    data = await asyncio.to_thread(messaging.download_file, doc.get("file_id"))
+    if not data:
+        await asyncio.to_thread(messaging.send_to_chat, chat_id, "Ich konnte das PDF nicht laden.")
+        return
+    if len(data) > _TG_MAX_DOC_BYTES:
+        await asyncio.to_thread(messaging.send_to_chat, chat_id,
+                                "Das PDF ist zu groß (max. 20 MB) — bitte kleiner schicken.")
+        return
+    mime = doc.get("mime_type") or "application/pdf"
+    sid = f"tg{chat_id}"
+    user = await asyncio.to_thread(messaging.user_for_chat, chat_id)
+    if user:
+        hub.set_identity(sid, {"user_id": user["id"], "username": user["username"], "confidence": 1.0})
+    debug.log("telegram_document_in", chat=chat_id, user=(user or {}).get("username"),
+              bytes=len(data), file=fname, caption=caption[:200])
+    data_uri = f"data:{mime};base64," + base64.b64encode(data).decode()
+    prompt = caption or "Ich schicke dir ein PDF. Worum geht es darin?"
+    try:
+        reply, _ = await _run_chat(
+            ChatRequest(message=prompt, session_id=sid,
+                        document={"name": fname, "mime": mime, "data_uri": data_uri}),
+            channel="telegram")
+    except Exception as e:
+        reply = f"Fehler: {e}"
+    await _telegram_reply(chat_id, reply, bool(_TG_VOICE_RE.search(caption)))
+
+
 async def _telegram_poller() -> None:
     """Dauerhafter Long-Poll-Loop; idlet, solange Telegram deaktiviert ist (Live-Toggle möglich)."""
     offset = 0
@@ -2257,10 +2366,12 @@ async def _telegram_poller() -> None:
                 await _handle_telegram_message(chat, txt, sender)
             elif chat and voice:
                 await _handle_telegram_voice(chat, voice, sender)
+            elif chat and documents.is_pdf(doc.get("file_name") or "", doc.get("mime_type") or ""):
+                await _handle_telegram_document(chat, m, sender)       # PDF (Baustein 1)
             elif chat and doc and await asyncio.to_thread(messaging.is_verified, chat):
                 await asyncio.to_thread(messaging.send_to_chat, chat,
                                         "Diese Datei kann ich noch nicht verarbeiten — "
-                                        "Text, Sprachnachrichten und Bilder gehen aber.")
+                                        "Text, Sprachnachrichten, Bilder und PDFs gehen aber.")
 
 
 @app.websocket("/ws/satellite")
@@ -2363,13 +2474,11 @@ async def ws_client(websocket: WebSocket):
 
 # ── Wissensbasis (RAG) ────────────────────────────────────────────────────────
 
-def _extract_text(filename: str, data: bytes) -> str:
-    name = (filename or "").lower()
-    if name.endswith(".pdf"):
-        import io
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(data))
-        return "\n\n".join((p.extract_text() or "") for p in reader.pages)
+def _extract_text(filename: str, data: bytes, cfg: dict | None = None) -> str:
+    """Text einer hochgeladenen Datei. PDFs gehen über documents.extract_pdf — damit sind
+    auch GESCANNTE PDFs durchsuchbar (Seiten ohne Textebene werden per Vision gelesen)."""
+    if documents.is_pdf(filename or "", "", data):
+        return documents.extract_text(data, cfg or config.get())
     return data.decode("utf-8", errors="replace")
 
 
@@ -2378,7 +2487,7 @@ async def knowledge_upload(file: UploadFile = File(...)):
     cfg = config.get()
     data = await file.read()
     try:
-        text = await asyncio.to_thread(_extract_text, file.filename or "", data)
+        text = await asyncio.to_thread(_extract_text, file.filename or "", data, cfg)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Datei nicht lesbar: {e}")
     if not text.strip():
